@@ -178,6 +178,15 @@
   },
   "options": {
     "step": {
+      "google_metadata": {
+        "title": "Google Photos metadata and privacy",
+        "description": "Photo descriptions, camera details, and exposure metadata use Google's undocumented public endpoint without a Google login. Results are cached; unavailable metadata does not prevent the slideshow from loading.\n\nOriginal photo GPS is a separate opt-in, off by default. It reads up to 256 KB per photo. Original files can retain precise GPS even when Google Photos hides locations from shared viewers. Coordinates are cached in Home Assistant and exposed in camera attributes. Google-added or estimated locations are not included.\n\nPlace-name lookup is also off by default. It requires original GPS reading and sends coordinates to the public OpenStreetMap Nominatim service. Disabling original GPS hides coordinates and place names and stops both lookups; it does not erase previous history or backups.",
+        "data": {
+          "google_metadata": "Fetch photo metadata (experimental)",
+          "google_location": "Read original photo GPS (opt-in)",
+          "reverse_geocode": "Look up GPS place names via OpenStreetMap (opt-in)"
+        }
+      },
       "init": {
         "title": "Location & privacy options",
         "description": "Reverse geocoding sends your photos' EXIF GPS coordinates to the public OpenStreetMap Nominatim service to look up a human-readable place name. Coordinates are rounded to ~100 m before lookup and cached on disk. Turn this off to keep coordinates entirely local; the latitude and longitude attributes still work either way.",

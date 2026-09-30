@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from .coordinator import MediaItem
 
@@ -61,6 +62,7 @@ _SIZE_SUFFIX_RE = re.compile(r"=[wh]\d+(?:-[a-z0-9]+)*$", re.IGNORECASE)
 
 _VIDEO_DURATION_KEY = 76647426  # presence indicates a video; we skip those
 _LIVEPHOTO_KEY = 146008172
+_LOCATION_HEADER_BYTES = 256 * 1024
 
 
 class _AlbumKeys:
@@ -127,6 +129,146 @@ async def fetch_album(
         len(items), page_no,
     )
     return title, items, video_keys
+
+
+async def fetch_metadata_keys(session, share_url: str, *, timeout: float = 15.0):
+    """Read public share keys for optional enrichment, without changing pagination."""
+    async with session.get(
+        share_url, headers={"User-Agent": _BROWSER_UA}, timeout=timeout,
+        allow_redirects=True,
+    ) as response:
+        html = await _read_metadata_body(response, 4 * 1024 * 1024)
+    keys = _extract_keys(html)
+    if keys is None:
+        raise ValueError("Public Google album metadata keys unavailable")
+    return keys
+
+
+async def fetch_photo_location_header(
+    session, image_url: str, *, timeout: float = 15.0,
+) -> bytes:
+    """Read a bounded original-image prefix for explicitly enabled GPS extraction."""
+    parsed = urlsplit(image_url)
+    if (
+        parsed.scheme != "https"
+        or not (parsed.hostname or "").endswith(".googleusercontent.com")
+        or parsed.port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("Unexpected Google image URL")
+    original = urlunsplit(parsed._replace(
+        path=_SIZE_SUFFIX_RE.sub("", parsed.path) + "=d", fragment="",
+    ))
+    async with session.get(
+        original, headers={"Range": f"bytes=0-{_LOCATION_HEADER_BYTES - 1}"},
+        timeout=timeout, allow_redirects=False,
+    ) as response:
+        response.raise_for_status()
+        if response.status not in (200, 206):
+            raise ValueError("Unexpected Google image response")
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        if not content_type.startswith("image/") and content_type != "application/octet-stream":
+            raise ValueError("Google image response is not an image")
+        if response.status == 206 and not re.fullmatch(
+            r"bytes 0-\d+/(?:\d+|\*)", response.headers.get("Content-Range", ""),
+        ):
+            raise ValueError("Unexpected Google image byte range")
+        content = bytearray()
+        async for chunk in response.content.iter_chunked(32768):
+            content.extend(chunk[:_LOCATION_HEADER_BYTES - len(content)])
+            if len(content) >= _LOCATION_HEADER_BYTES:
+                break
+        return bytes(content)
+
+
+async def fetch_photo_metadata(
+    session, keys: _AlbumKeys, media_key: str, *, timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Read camera metadata and description from Google's public photo endpoint."""
+    payload = [media_key, None, keys.auth_key, None, keys.album_key]
+    envelope = json.dumps([[["VrseUb", json.dumps(payload), None, "generic"]]])
+    endpoint = "https://photos.google.com/u/0/_/PhotosUi/data/batchexecute"
+    headers = {
+        "User-Agent": _BROWSER_UA,
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "Origin": "https://photos.google.com",
+        "Referer": f"https://photos.google.com/share/{keys.album_key}?key={keys.auth_key}",
+    }
+    async with session.post(
+        endpoint, params={"rpcids": "VrseUb", "source-path": f"/share/{keys.album_key}"},
+        headers=headers, data=f"f.req={quote(envelope)}", timeout=timeout,
+        allow_redirects=False,
+    ) as response:
+        body = await _read_metadata_body(response, 1024 * 1024)
+    for line in body.splitlines():
+        try:
+            entries = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if (
+                isinstance(entry, list) and len(entry) >= 3
+                and entry[:2] == ["wrb.fr", "VrseUb"] and isinstance(entry[2], str)
+            ):
+                detail = json.loads(entry[2])
+                if _metadata_value(detail, 0, 0) != media_key:
+                    raise ValueError("Google photo metadata identity mismatch")
+                return parse_photo_metadata(detail)
+    raise ValueError("Google photo metadata response unavailable")
+
+
+async def _read_metadata_body(response, limit: int) -> str:
+    response.raise_for_status()
+    if response.status != 200:
+        raise ValueError("Unexpected Google metadata response")
+    chunks = []
+    length = 0
+    async for chunk in response.content.iter_chunked(65536):
+        length += len(chunk)
+        if length > limit:
+            raise ValueError("Google metadata response exceeds size limit")
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8")
+
+
+def _metadata_value(value: Any, *indices: int) -> Any:
+    for index in indices:
+        if not isinstance(value, list) or index >= len(value):
+            return None
+        value = value[index]
+    return value
+
+
+def parse_photo_metadata(detail: Any) -> dict[str, Any]:
+    """Extract the camera and description fields verified in public responses."""
+    photo = _metadata_value(detail, 0)
+    if not isinstance(photo, list):
+        raise ValueError("Invalid Google photo metadata")
+    camera = _metadata_value(detail, 0, 1, 8, 4)
+    result: dict[str, Any] = {}
+    for field, index in (("camera_make", 0), ("camera_model", 1)):
+        value = _metadata_value(camera, index)
+        if isinstance(value, str) and value.strip():
+            result[field] = value.strip()[:128]
+    for field, index in (
+        ("focal_length_mm", 3), ("aperture_f_number", 4),
+        ("iso", 5), ("exposure_time_seconds", 6),
+    ):
+        value = _metadata_value(camera, index)
+        if type(value) in (int, float) and math.isfinite(value) and value > 0:
+            if field != "iso" or float(value).is_integer():
+                result[field] = int(value) if field == "iso" else float(value)
+    for section in photo:
+        if not isinstance(section, dict):
+            continue
+        description = _metadata_value(section.get("396644657", section.get(396644657)), 0)
+        if isinstance(description, str) and description.strip():
+            result["description"] = description.strip()
+            break
+    return result
 
 
 # -- Internals ---------------------------------------------------------------
@@ -398,13 +540,13 @@ def _parse_album_item(raw: Any) -> MediaItem | None:
     )
 
 
-# Plausible epoch-ms range: 2000-01-01 to 2100-01-01.
-_MIN_TS_MS = 946_684_800_000
+# Plausible epoch-ms range: 1800-01-01 to 2100-01-01.
+_MIN_TS_MS = -5_364_662_400_000
 _MAX_TS_MS = 4_102_444_800_000
 
 
 def _looks_like_timestamp_ms(value: Any) -> bool:
-    return isinstance(value, int) and _MIN_TS_MS <= value <= _MAX_TS_MS
+    return type(value) is int and _MIN_TS_MS <= value <= _MAX_TS_MS
 
 
 # -- AF block parsing (for the initial 300 items embedded in the HTML) ------

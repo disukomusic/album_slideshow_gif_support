@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, MAX_CUSTOM_LOOKBACK_DAYS
 from .coordinator import AlbumCoordinator
 from .store import SlideshowStore
 
@@ -23,6 +23,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             PairMinGapPercentNumber(entry, store),
             NavigationBufferSizeNumber(entry, store),
             ImageCacheMbNumber(entry, store),
+            CustomLookbackDaysNumber(entry, store),
+            ShuffleAgeBiasNumber(entry, store),
         ]
     )
 
@@ -47,6 +49,66 @@ class _BaseNumber(NumberEntity, RestoreEntity):
             "name": f"Album Slideshow {self.entry.title}",
             "manufacturer": "Album Slideshow",
         }
+
+
+class CustomLookbackDaysNumber(_BaseNumber):
+    _attr_icon = "mdi:calendar-range"
+    _attr_native_min_value = 1
+    _attr_native_max_value = MAX_CUSTOM_LOOKBACK_DAYS
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "d"
+
+    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
+        super().__init__(entry, store)
+        self._attr_unique_id = f"{entry.entry_id}_custom_lookback_days"
+        self._attr_name = "Custom lookback days"
+
+    @property
+    def native_value(self):
+        return int(self.store.custom_lookback_days)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.store.custom_lookback_days = max(1, min(MAX_CUSTOM_LOOKBACK_DAYS, int(value)))
+        self.store.notify()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        old = await self.async_get_last_state()
+        if old and old.state not in (None, "unknown", "unavailable"):
+            try:
+                await self.async_set_native_value(float(old.state))
+            except (TypeError, ValueError, OverflowError):
+                return
+
+
+class ShuffleAgeBiasNumber(_BaseNumber):
+    _attr_icon = "mdi:shuffle-variant"
+    _attr_native_min_value = -100
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
+        super().__init__(entry, store)
+        self._attr_unique_id = f"{entry.entry_id}_shuffle_age_bias"
+        self._attr_name = "Shuffle age bias"
+
+    @property
+    def native_value(self):
+        return int(self.store.shuffle_age_bias)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.store.shuffle_age_bias = max(-100, min(100, int(value)))
+        self.store.notify()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        old = await self.async_get_last_state()
+        if old and old.state not in (None, "unknown", "unavailable"):
+            try:
+                await self.async_set_native_value(float(old.state))
+            except (TypeError, ValueError, OverflowError):
+                return
 
 
 class SlideIntervalNumber(_BaseNumber):

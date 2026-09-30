@@ -10,7 +10,7 @@ images, not videos. Install the integration first using the
 
 | Provider | Best for | Date filter / ordering | Location | Description caption |
 |----------|----------|:---:|:---:|:---:|
-| [Google Photos](#google-photos) | A shared album link | Yes (dates only) | No | No |
+| [Google Photos](#google-photos) | A shared album link | Yes | Separate opt-in | Optional enrichment |
 | [Immich](#immich) | An Immich server (album, person, favorites, all, search) | Yes | Yes | Yes |
 | [PhotoPrism](#photoprism) | A PhotoPrism server (album, person, favorites, all, search) | Yes | Yes | Yes |
 | [iCloud](#icloud-shared-album) | An iCloud Shared Album public link | Yes | No | Yes |
@@ -21,8 +21,11 @@ images, not videos. Install the integration first using the
 | [Local Folder](#local-folder-or-nas) | Files on the HA host / NAS | Yes | Yes | Yes |
 | [Media Source](#media-source) | Any HA media source with no API (local media, Jellyfin, ...) | No | No | No |
 
-> Media Source and Google Photos serve photos as URLs, so there is no EXIF
-> to read. For full metadata (dates, location, description), use **Local
+> Media Source and Google's resized display images do not provide EXIF for
+> this integration to read. Google descriptions and camera fields can be
+> fetched separately through experimental enrichment; original-photo GPS
+> requires the separate [location opt-in](#google-location-and-privacy). For full metadata
+> (dates, location, description), use **Local
 > Folder** for local/NAS files or the **Immich** / **PhotoPrism** provider for
 > a self-hosted photo server. The Media Source route also works with those but
 > without metadata, so prefer the direct provider when you have one.
@@ -33,6 +36,61 @@ images, not videos. Install the integration first using the
 2. Copy the shared link such as `https://photos.app.goo.gl/...`.
 3. Add the integration.
 4. Paste the link.
+
+### Experimental Photo Metadata
+
+Google Photos metadata enrichment is on by default, including existing entries
+without a saved preference. A previously saved off setting stays off. Use
+**Configure > Fetch photo metadata (experimental)** to turn it on or off per album.
+The slideshow loads as usual while a separate worker reads photo descriptions,
+camera make/model, focal length, aperture, ISO, and exposure time from the
+public album. Descriptions use the existing caption option on the card.
+
+Results are cached per photo and survive restarts. Requests are sequential,
+limited to one per second, and stop after repeated failures or a permission or
+rate-limit response. Failed photos can retry at the next album refresh.
+Metadata failures do not block the slideshow or change the source library.
+No Google account login or cookies are used. The endpoint is undocumented and
+may change. Later edits to descriptions on already-cached photos are not
+automatically reread in this experimental build.
+
+The fields are camera attributes, with each paired photo's values also in
+`caption_frames`. See the [attribute reference](reference.md#camera-attributes).
+Disabling the option stops camera/description enrichment; the separate GPS
+option is independent. A HACS reinstall or
+update can replace a locally installed test build.
+
+### Google Location and Privacy
+
+In **Settings > Devices & services > Album Slideshow**, choose the Google
+album's **Configure** button. Location has two independent consent controls:
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| **Read original photo GPS (opt-in)** | Off | Fetches up to 256 KB of each original photo to extract embedded GPS into the existing `latitude` / `longitude` camera attributes |
+| **Look up GPS place names via OpenStreetMap (opt-in)** | Off | When GPS reading is also enabled, sends coordinates to the public Nominatim service and fills the existing `location` attribute and caption field |
+
+**Original files can retain precise GPS even when Google Photos hides
+locations from shared viewers.** These settings are separate from Google's
+sharing controls. Only enable original GPS reading if you intend to expose
+that embedded location in Home Assistant. No Google login is used, and this
+does not change the source photos or their Google sharing settings.
+
+Coordinates and place labels are cached in Home Assistant and included in
+`caption_frames` for each displayed photo. They may also enter recorder history
+and backups. Turning GPS off stops original-header downloads and place-name
+requests, and hides cached coordinates and labels from the current camera.
+Turning only place names off retains GPS attributes but hides the label and
+stops Nominatim requests. Opting out is not an erasure of older caches, recorded
+history, or backups.
+
+The original header is read separately from the resized slideshow image, in
+the background. Successful scans, including photos with no GPS, are cached by
+photo identity. Failed or truncated reads retry on a later album refresh; the
+integration does not download the full original to work around the header cap.
+Headers larger than the cap or unsupported formats may therefore lack location.
+This reads embedded camera GPS, not locations added, edited, or estimated in
+Google Photos. No additional per-photo sensors are created.
 
 ### Google Photos Limits
 

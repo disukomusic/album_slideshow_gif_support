@@ -6,6 +6,8 @@
 - [Hide photos and use the toolbar](#hide-photos-from-a-slideshow)
 - [Full YAML options](#full-options)
 - [Transitions and captions](#transitions-and-captions)
+- [Multiple captions and clocks](#multiple-captions-and-clocks)
+- [Full-screen dashboard example](#full-screen-dashboard-example)
 
 ## Add the Card
 
@@ -128,8 +130,8 @@ fit: auto                   # auto | cover | contain
 background: '#000'          # color shown behind contained images
 tap_action: none            # none | more-info
 photo_controls: on_demand
-caption:                    # overlay the photo's date, location and/or description
-  show: [date, location]    #   any of: date, location, description (order = display order)
+caption:                    # overlay selected photo metadata
+  show: [date, location]    #   fields below; order = display order
   position: bottom-left     #   top/center/bottom + -left/-center/-right, or center
   date_format: medium       #   medium | full | month_year | year | numeric
                             #     | weekday | relative, or a custom token string
@@ -146,10 +148,153 @@ caption:                    # overlay the photo's date, location and/or descript
 - `transition: random` picks a different effect per slide and avoids repeating the previous one. Effects are `none`, `fade`, `slide-left`, `slide-right`, `slide-up`, `slide-down`, `wipe-left`, `wipe-right`, and `zoom`; `duration` and `easing` control the timing.
 - `fit: auto` reads the camera's `fill_mode` attribute. `blur` renders the slide as `contain` plus a blurred backdrop layer behind it.
 - `photo_controls` defaults to Off. See [Hide Photos From a Slideshow](#hide-photos-from-a-slideshow) for toolbar modes, gestures, paired-photo choices, and restore behavior.
-- **Caption overlay:** omit the `caption:` block (or set `show: []`) to disable it. The date comes from `captured_at`; `location` and `description` come from photo metadata. Availability varies by [provider](provider-setup.md#choose-a-provider), and missing fields are skipped. Google Photos supplies dates but no location or description; Media Source supplies none of those fields. On a portrait pair, `per_image: true` anchors each photo's own date/location/description to its half; set it to `false` for a single caption over the whole frame.
+- **Caption overlays:** use `captions:` for multiple independently styled overlays; the original single `caption:` configuration still works. Omit both to disable captions, or set `captions: []`. Availability varies by [provider](provider-setup.md#choose-a-provider), and missing fields are skipped. Google enrichment supplies descriptions and camera metadata; generic Media Source has no equivalent metadata path. On a pair, `per_image: true` anchors each photo's own metadata to its half; set it to `false` for a single caption over the whole frame.
 - `date_format` accepts a preset name or a custom token string. Presets are locale-aware (they follow your Home Assistant language). Example custom format: `'D MMMM YYYY'` -> `29 July 2023`. The `REL` token inserts relative time, so `'D MMMM YYYY - REL'` -> `29 July 2023 - 3 years ago`.
 - Every slide commit increments the camera's `frame_id` attribute. The card cache-busts the camera proxy URL with that value, so the browser refetches a fresh JPEG on every change instead of serving a stale cached image.
 - If the entity is unavailable, the card shows a "Camera not ready" placeholder.
+
+### Caption Fields
+
+Choose these in a caption's **Content > Add** picker, or list them in `caption.show`:
+
+| Field | Display |
+|-------|---------|
+| `date` | Photo capture date in the chosen date format |
+| `current_date` | Today's date, using Home Assistant's time zone and the chosen date format |
+| `current_time` | Live time, using Home Assistant's time zone and the chosen time format |
+| `weather` | Current condition and temperature from a selected weather entity, or the selected sensor's state and units |
+| `location` | Source location or reverse-geocoded place name |
+| `description` | Photo description |
+| `camera` | Camera make and model together, without a duplicated brand |
+| `camera_make` | Camera brand only |
+| `camera_model` | Camera model only |
+| `focal_length_mm` | Focal length, such as `5.28 mm` |
+| `aperture_f_number` | Aperture, such as `f/1.7` |
+| `iso` | ISO sensitivity, such as `ISO 116` |
+| `exposure_time_seconds` | Exposure, such as `1/125 s` or `2.5 s` |
+
+Exposure fractions are rounded for readability. Numeric metadata must be
+available as a positive finite number; missing or invalid values leave no empty
+line. Only Google enrichment currently populates camera/exposure attributes.
+Existing caption positions, font settings, and per-image layout apply to every
+field. Keep the field selection and font size appropriate for small paired cards;
+captions wrap within their own photo region and shrink only when needed to fit.
+The chosen font size returns when more space is available.
+
+## Multiple Captions and Clocks
+
+In the card editor, expand **Captions > Add caption**. The caption list is
+collapsed by default, like the other editor sections. Each caption has its own
+enabled toggle, position, content selection, color, font size, weight, shadow,
+and paired-photo setting. Use the copy icon to duplicate a caption at another
+available position, or the delete icon to remove it. The same field can appear
+in several captions, with different styling in each.
+
+Each caption's header shows its placement, with its selected content summarized
+on one line underneath. The **Content** field uses draggable chips: use **Add**
+to search for a field, drag selected chips to change their display order, or
+use a chip's remove button to drop it. The order is saved in `show` and controls
+the caption's line order.
+
+**Photo date** is the date the displayed picture was taken. **Today's date**
+and **Current time** are independent of the photo and keep updating while the
+slideshow is paused. **Photo date format** and **Today's date format** have
+separate preset and custom-format selectors, even when both dates appear in the
+same caption. Custom formats such as `DD MMMM YYYY - REL` still combine the
+photo date with localized relative time, as in issue #31.
+The clock offers HA's time-format preference, explicit
+12-hour or 24-hour display, and optional seconds. These fields are rendered in
+the browser; they need no additional sensors or backend requests.
+
+Captions containing only today's date, time, or weather appear once over the whole
+frame. Captions that also include photo metadata follow their own `per_image`
+setting. Captions sharing the same position stack in list order. Other
+positions reserve space for one another, and crowded text shrinks to fit.
+
+```yaml
+type: custom:album-slideshow-card
+entity: camera.album_slideshow_living_room
+captions:
+  - show: [date, location]
+    position: bottom-left
+    font_size: 16px
+    per_image: true
+  - show: [description, camera]
+    position: bottom-right
+    font_size: 14px
+    per_image: true
+  - show: [current_date]
+    position: top-left
+    current_date_format: weekday
+    font_size: 14px
+  - show: [current_time]
+    position: top-right
+    time_format: 24h        # auto (HA preference) | 12h | 24h
+    time_seconds: false
+    font_size: 28px
+    font_weight: semibold
+```
+
+Each list item accepts the same styling options as the original `caption:`
+block. Add `enabled: false` to keep a caption configured but hidden. An explicit
+`captions:` list takes precedence if a legacy `caption:` block is also present;
+existing single-caption configurations need no migration.
+For today's date, `current_date_format` takes precedence over `date_format`;
+existing configurations that used only `date_format` continue to work.
+
+### Full-Screen Dashboard Example
+
+![Full-screen photo dashboard with a clock, temperature, and photo date and location](fullscreen-dashboard.jpg)
+
+This example uses three independently placed captions: photo date and location
+at the top right, temperature from a selected sensor at the bottom left, and
+a large live clock at the bottom right. Use **Captions > Add caption** for each
+overlay, then choose its placement, content, and font size. The same settings
+also work in an ordinary dashboard card.
+
+Full-screen or kiosk display and automatic screensaver activation are provided
+by your dashboard, browser, or device configuration, not by the card. The card
+supplies the slideshow and captions; it does not turn screensaver mode on.
+
+### Weather Captions
+
+Select **Weather** in a caption's **Content > Add** picker, then choose the required
+**Weather source**. The picker accepts an existing `weather.*` entity or
+`sensor.*` entity. No source is chosen automatically and no new sensor is created.
+
+A weather entity displays its localized condition and current temperature,
+such as "Partly cloudy, 22.5 C". A sensor displays its state with its configured
+units. The caption follows that entity's HA updates, including while a photo
+is paused, without fetching or changing the slide. A missing, unknown, or
+unavailable source leaves the weather line hidden. Other selected caption
+fields continue to display.
+
+Each caption can select a different source and use its own placement and style:
+
+```yaml
+captions:
+  - show: [weather]
+    weather_entity: weather.home
+    position: top-right
+    font_size: 18px
+```
+
+Use your own weather entity or sensor ID. This reads current HA state only;
+it does not request forecasts or contact an additional weather service.
+
+For example, `show: [date, description, camera, iso, exposure_time_seconds]`
+adds photo details without creating any sensor entities. The default remains
+`[date, location]` when captions are enabled without a field selection.
+
+For Google location captions, enable both [location privacy options](provider-setup.md#google-location-and-privacy)
+in the integration's Configure dialog, then select `location` in the card.
+GPS reading alone supplies coordinates as attributes, not a place-name caption.
+Both location options are off by default and independent of camera metadata.
+
+The card editor also exposes **Custom lookback days** and **Shuffle age bias**
+under Slideshow settings when the corresponding modes are selected. These are
+integration controls, not card YAML settings. See the
+[lookback and shuffle reference](reference.md#custom-lookback-and-age-bias).
 
 See the [rendering reference](reference.md#rendering-options) for fill modes,
 orientation pairing, aspect ratios, and transparent dividers.

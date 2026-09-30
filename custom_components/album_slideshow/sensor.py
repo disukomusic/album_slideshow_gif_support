@@ -22,7 +22,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         CacheUsageSensor(entry, coordinator),
         HiddenPhotoCountSensor(entry, coordinator),
     ]
-    if coordinator.provider in ENRICHING_PROVIDERS:
+    if (
+        coordinator.provider in ENRICHING_PROVIDERS
+        or coordinator.google_metadata_enabled
+        or coordinator.google_location_enabled
+    ):
         # Diagnostic surface for the background enrichment pass (per-photo
         # metadata reads and/or reverse-geocode). Providers with nothing to
         # enrich omit it to keep the device screen tidy.

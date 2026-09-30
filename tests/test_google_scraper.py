@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
 import json
+from types import SimpleNamespace
+from urllib.parse import parse_qs
+
+import pytest
 
 from custom_components.album_slideshow import google_scraper as gs
 
@@ -350,15 +356,43 @@ def test_parse_album_item_extracts_timestamps_and_size():
     assert item.byte_size == 2700088
 
 
-def test_parse_album_item_rejects_implausible_timestamps():
+@pytest.mark.parametrize("value", [
+    gs._MIN_TS_MS - 1, gs._MAX_TS_MS + 1, True, False, "946684800000",
+    946684800000.0, None, [], {},
+])
+def test_parse_album_item_rejects_implausible_timestamps(value):
     raw = [
-        "mk", ["https://lh3.googleusercontent.com/x", 100, 100], 12345,  # too small
-        "dedup", 0, 99999,
+        "mk", ["https://lh3.googleusercontent.com/x", 100, 100], value,
+        "dedup", 0, value,
     ]
     item = gs._parse_album_item(raw)
     assert item is not None
     assert item.captured_at is None
     assert item.uploaded_at is None
+
+
+@pytest.mark.parametrize("year", [1800, 1900, 1950, 1969, 1970, 1980, 1995, 1999, 2000, 2026])
+@pytest.mark.parametrize("source", ["html", "batchexecute"])
+def test_album_pages_preserve_historical_capture_dates(year, source):
+    from custom_components.album_slideshow.camera import _ts_to_iso
+
+    captured = datetime(year, 1, 1, tzinfo=timezone.utc)
+    timestamp = int(captured.timestamp() * 1000)
+    raw = [
+        "old-photo", ["https://lh3.googleusercontent.com/historical", 1000, 800],
+        timestamp, "dedup", 0, 1700000000000,
+    ]
+    if source == "html":
+        items = gs.parse_album_html(_make_html([raw]))
+    else:
+        items, _ = gs._parse_batchexecute_album_page(
+            _make_batchexecute_response([raw], None)
+        )
+
+    assert len(items) == 1
+    assert items[0].captured_at == timestamp
+    assert items[0].uploaded_at == 1700000000000
+    assert _ts_to_iso(items[0].captured_at) == captured.isoformat()
 
 
 def test_parse_album_item_handles_missing_size():
@@ -421,3 +455,161 @@ def test_video_key_sink_is_optional():
     body = _make_batchexecute_response([photo], None)
     items, _ = gs._parse_batchexecute_album_page(body)
     assert len(items) == 1
+
+
+def _metadata_detail(camera):
+    visual = ["https://example.test/photo", 1000, 800, None, None, None, None, None,
+              [None, None, None, None, camera]]
+    return [["photo-key", visual], None, [], [], {}]
+
+
+def test_google_camera_metadata_fields_match_verified_response():
+    detail = _metadata_detail([" Apple ", "iPhone 7", None, 3.99, 1.8, 20, 0.0011376564])
+    assert gs.parse_photo_metadata(detail) == {
+        "camera_make": "Apple", "camera_model": "iPhone 7", "focal_length_mm": 3.99,
+        "aperture_f_number": 1.8, "iso": 20, "exposure_time_seconds": 0.0011376564,
+    }
+
+
+@pytest.mark.parametrize("key", ["396644657", 396644657])
+@pytest.mark.parametrize("position", [2, 10, 15])
+def test_google_description_uses_photo_metadata_key(key, position):
+    detail = _metadata_detail(None)
+    detail[0].extend([None] * (position + 1 - len(detail[0])))
+    detail[0][position] = {key: ["  Summer by the lake  "]}
+
+    assert gs.parse_photo_metadata(detail) == {"description": "Summer by the lake"}
+
+
+@pytest.mark.parametrize("description", [None, [], [None], [42], [False], [""], ["  "], "not a list"])
+def test_google_description_ignores_empty_or_malformed_values(description):
+    detail = _metadata_detail(None)
+    detail[0].append({"396644657": description})
+
+    assert gs.parse_photo_metadata(detail) == {}
+
+
+def test_google_description_does_not_use_album_or_comment_text():
+    detail = _metadata_detail(None)
+    detail[0].append({"other": ["unrelated text"]})
+    detail.append({"396644657": ["not this photo's description"]})
+
+    assert gs.parse_photo_metadata(detail) == {}
+
+
+@pytest.mark.parametrize("camera", [None, [], [None] * 9, "unexpected"])
+def test_google_missing_camera_metadata_is_successfully_empty(camera):
+    assert gs.parse_photo_metadata(_metadata_detail(camera)) == {}
+
+
+@pytest.mark.parametrize("invalid", [True, False, float("nan"), float("inf"), -1, 0, "20"])
+def test_google_camera_metadata_rejects_invalid_numbers(invalid):
+    assert gs.parse_photo_metadata(_metadata_detail([None, None, None] + [invalid] * 4)) == {}
+
+
+class _MetadataResponse:
+    status = 200
+
+    def __init__(self, body):
+        self.body = body.encode()
+        self.content = self
+
+    def raise_for_status(self):
+        return None
+
+    async def iter_chunked(self, size):
+        for offset in range(0, len(self.body), size):
+            yield self.body[offset:offset + size]
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+def test_google_metadata_request_is_read_only_and_uses_share_keys():
+    detail = _metadata_detail(["Apple", "iPhone", None, 4.0, 1.8, 20, 0.01])
+    response = _MetadataResponse(")]}'\n123\n" + json.dumps([
+        ["wrb.fr", "VrseUb", json.dumps(detail)],
+    ]))
+    requests = []
+
+    def post(url, **kwargs):
+        requests.append((url, kwargs))
+        return response
+
+    result = asyncio.run(gs.fetch_photo_metadata(
+        SimpleNamespace(post=post), gs._AlbumKeys("album-key", "share-key"), "photo-key",
+    ))
+
+    assert result["camera_model"] == "iPhone"
+    url, request = requests[0]
+    assert url.endswith("/PhotosUi/data/batchexecute")
+    assert request["params"]["rpcids"] == "VrseUb"
+    assert not {"Cookie", "Authorization"}.intersection(request["headers"])
+    encoded = json.loads(parse_qs(request["data"])["f.req"][0])
+    assert json.loads(encoded[0][0][1]) == ["photo-key", None, "share-key", None, "album-key"]
+    assert request["allow_redirects"] is False
+
+
+@pytest.mark.parametrize("body", ["", "not JSON", '[["wrb.fr", "VrseUb", "null"]]'])
+def test_google_bad_metadata_is_retryable(body):
+    session = SimpleNamespace(post=lambda *args, **kwargs: _MetadataResponse(body))
+    with pytest.raises(ValueError):
+        asyncio.run(gs.fetch_photo_metadata(session, gs._AlbumKeys("album", "key"), "photo-key"))
+
+
+def test_google_metadata_response_is_size_limited():
+    with pytest.raises(ValueError, match="size limit"):
+        asyncio.run(gs._read_metadata_body(_MetadataResponse("x" * 1025), 1024))
+
+
+@pytest.mark.parametrize("status", [200, 206])
+def test_google_location_header_is_bounded_and_uses_original_image(status):
+    response = _MetadataResponse("x" * (gs._LOCATION_HEADER_BYTES + 65536))
+    response.status = status
+    response.headers = {
+        "Content-Type": "image/jpeg",
+        "Content-Range": f"bytes 0-{gs._LOCATION_HEADER_BYTES - 1}/4000000",
+    }
+    requests = []
+
+    def get(url, **kwargs):
+        requests.append((url, kwargs))
+        return response
+
+    result = asyncio.run(gs.fetch_photo_location_header(
+        SimpleNamespace(get=get), "https://lh3.googleusercontent.com/photo=w3840-h2880?key=retained",
+    ))
+
+    assert len(result) == gs._LOCATION_HEADER_BYTES
+    url, request = requests[0]
+    assert url == "https://lh3.googleusercontent.com/photo=d?key=retained"
+    assert request["headers"] == {"Range": "bytes=0-262143"}
+    assert request["allow_redirects"] is False
+    assert request["timeout"] == 15.0
+
+
+@pytest.mark.parametrize("url", [
+    "http://lh3.googleusercontent.com/photo", "https://example.test/photo",
+    "https://googleusercontent.com.example.test/photo", "https://googleusercontent.com/photo",
+    "https://user:password@lh3.googleusercontent.com/photo",
+    "https://lh3.googleusercontent.com:8123/photo",
+])
+def test_google_location_header_rejects_unexpected_hosts_without_fetching(url):
+    with pytest.raises(ValueError, match="Unexpected Google image URL"):
+        asyncio.run(gs.fetch_photo_location_header(SimpleNamespace(), url))
+
+
+@pytest.mark.parametrize("status,content_type,content_range", [
+    (302, "image/jpeg", ""), (200, "text/html", ""),
+    (206, "image/jpeg", ""), (206, "image/jpeg", "bytes 100-200/300"),
+])
+def test_google_location_header_rejects_invalid_responses(status, content_type, content_range):
+    response = _MetadataResponse("not an image")
+    response.status = status
+    response.headers = {"Content-Type": content_type, "Content-Range": content_range}
+    session = SimpleNamespace(get=lambda *args, **kwargs: response)
+    with pytest.raises(ValueError):
+        asyncio.run(gs.fetch_photo_location_header(session, "https://lh3.googleusercontent.com/photo"))

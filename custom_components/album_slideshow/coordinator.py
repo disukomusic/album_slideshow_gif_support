@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from hashlib import sha256
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
 from typing import Any
 
+import aiohttp
 import async_timeout
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -22,6 +25,12 @@ from .const import (
     PUBLICALBUM_ENDPOINT,
     CONF_PROVIDER,
     CONF_ALBUM_URL,
+    CONF_GOOGLE_METADATA,
+    DEFAULT_GOOGLE_METADATA,
+    CONF_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_REVERSE_GEOCODE,
+    CAMERA_METADATA_FIELDS,
     CONF_LOCAL_PATH,
     CONF_MEDIA_CONTENT_ID,
     CONF_RECURSIVE,
@@ -97,6 +106,7 @@ from .const import (
 from .store import SlideshowStore
 
 _LOGGER = logging.getLogger(__name__)
+_GOOGLE_METADATA_INTERVAL = 1.0
 
 
 @dataclass
@@ -139,6 +149,8 @@ class MediaItem:
     exif_scanned: bool = False
     photo_id: str | None = None
     face_scanned: bool = False
+    camera_metadata: dict[str, Any] | None = None
+    google_location_scanned: bool = False
 
     def __post_init__(self) -> None:
         if self.photo_id is None:
@@ -317,11 +329,11 @@ def _pick_timestamp_ms(d: dict[str, Any], *path: str) -> int | None:
         if not isinstance(cur, dict):
             return None
         cur = cur.get(p)
-    if cur is None:
+    if cur is None or isinstance(cur, bool):
         return None
     if isinstance(cur, int):
-        # Heuristic: < 1e12 means seconds, otherwise milliseconds.
-        return cur * 1000 if cur < 10**12 else cur
+        # Infer seconds only within the plausible 1800-2100 date range.
+        return cur * 1000 if -5_364_662_400 <= cur <= 4_102_444_800 else cur
     if isinstance(cur, str):
         try:
             iso = cur.replace("Z", "+00:00")
@@ -783,7 +795,7 @@ def _read_exif_from_image(img: Any, out: dict[str, Any]) -> None:
 
 
 def _read_exif_from_bytes(
-    data: bytes, mtime_fallback_ms: int | None
+    data: bytes, mtime_fallback_ms: int | None, *, strict: bool = False,
 ) -> dict[str, Any]:
     """Read EXIF metadata from already-downloaded image bytes.
 
@@ -808,6 +820,8 @@ def _read_exif_from_bytes(
         with Image.open(io.BytesIO(data)) as img:
             _read_exif_from_image(img, out)
     except Exception as err:
+        if strict:
+            raise
         _LOGGER.debug("EXIF: failed to read image bytes: %s", err)
 
     return out
@@ -1123,7 +1137,29 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise
 
         items = data.get("items") or []
-        if self.provider in ENRICHING_PROVIDERS and items:
+        self._apply_google_location_privacy(items)
+        if (self.google_metadata_enabled or self.google_location_enabled) and items:
+            prior = (self.data or {}).get("items", []) if isinstance(self.data, dict) else []
+            if not self._items_cache_loaded:
+                cached = await self._load_cached_items()
+                prior = (cached or {}).get("items", []) + prior
+                self._items_cache_loaded = True
+            by_id = {item.source_id: item for item in prior if item.source_id}
+            for item in items:
+                previous = by_id.get(item.source_id)
+                if previous is None:
+                    continue
+                if self.google_metadata_enabled and isinstance(previous.camera_metadata, dict):
+                    item.camera_metadata = dict(previous.camera_metadata)
+                    item.description = previous.description
+                if self.google_location_enabled and previous.google_location_scanned:
+                    item.latitude = previous.latitude
+                    item.longitude = previous.longitude
+                    item.location = previous.location
+                    item.google_location_scanned = True
+            self._apply_google_location_privacy(items)
+            self._schedule_enrichment(data)
+        elif self.provider in ENRICHING_PROVIDERS and items:
             # Carry forward EXIF/geocode metadata for items we've already
             # scanned this session; new items get filled in by the
             # background worker below.
@@ -1161,7 +1197,44 @@ class AlbumCoordinator(DataUpdateCoordinator):
         finally:
             self._enrichment_task = None
 
+    @property
+    def google_metadata_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.provider == PROVIDER_GOOGLE_SHARED and bool(
+            options.get(CONF_GOOGLE_METADATA, DEFAULT_GOOGLE_METADATA)
+        )
+
+    @property
+    def google_location_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.provider == PROVIDER_GOOGLE_SHARED and bool(
+            options.get(CONF_GOOGLE_LOCATION, DEFAULT_GOOGLE_LOCATION)
+        )
+
+    @property
+    def google_reverse_geocode_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.google_location_enabled and bool(
+            options.get(CONF_REVERSE_GEOCODE, DEFAULT_GOOGLE_REVERSE_GEOCODE)
+        )
+
+    def _apply_google_location_privacy(self, items: list[MediaItem]) -> None:
+        if getattr(self, "provider", None) != PROVIDER_GOOGLE_SHARED:
+            return
+        for item in items:
+            if not self.google_location_enabled:
+                item.latitude = None
+                item.longitude = None
+                item.location = None
+                item.google_location_scanned = False
+            elif not self.google_reverse_geocode_enabled:
+                item.location = None
+
     def _needs_enrichment(self, item: MediaItem) -> bool:
+        if self.provider == PROVIDER_GOOGLE_SHARED:
+            return (
+                self.google_metadata_enabled and bool(item.source_id) and item.camera_metadata is None
+            ) or (self.google_location_enabled and not item.google_location_scanned)
         if not item.exif_scanned:
             return True
         return self.provider == PROVIDER_IMMICH and not item.face_scanned
@@ -1172,7 +1245,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         unscanned = [it for it in items if self._needs_enrichment(it)]
         # Providers that decrypt/return GPS inline (Ente) have nothing to scan
         # but still need the coordinates turned into a place label.
-        needs_geocode = any(
+        needs_geocode = (
+            self.provider != PROVIDER_GOOGLE_SHARED or self.google_reverse_geocode_enabled
+        ) and any(
             it.latitude is not None and it.longitude is not None and not it.location
             for it in items
         )
@@ -1196,7 +1271,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "geocode_done": 0,
         }
         self._enrichment_task = self.hass.async_create_background_task(
-            self._enrich_items_background(data),
+            self._enrich_google_items_background(data) if self.provider == PROVIDER_GOOGLE_SHARED
+            else self._enrich_items_background(data),
             name=f"album_slideshow_enrich_{self.entry.entry_id}",
         )
 
@@ -1241,10 +1317,16 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     photo_id=raw.get("photo_id"),
                     face_scanned=bool(raw.get("face_scanned", False))
                     and isinstance(raw.get("faces"), list),
+                    camera_metadata={
+                        key: value for key, value in raw["camera_metadata"].items()
+                        if key in CAMERA_METADATA_FIELDS
+                    } if isinstance(raw.get("camera_metadata"), dict) else None,
+                    google_location_scanned=bool(raw.get("google_location_scanned", False)),
                 ))
             except Exception:
                 continue
 
+        self._apply_google_location_privacy(items)
         return {
             "title": payload.get("title"),
             "items": items,
@@ -1252,6 +1334,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
     async def _save_cached_items(self, data: dict[str, Any]) -> None:
         items = data.get("items") or []
+        self._apply_google_location_privacy(items)
         # Local-folder URLs are absolute paths on the host; persisting them
         # is fine but they don't survive a host reformat. Persist anyway,
         # the URL check at load time will skip any stale entries.
@@ -1276,6 +1359,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "exif_scanned": it.exif_scanned,
                     "photo_id": it.photo_id,
                     "face_scanned": it.face_scanned,
+                    "camera_metadata": it.camera_metadata,
+                    "google_location_scanned": it.google_location_scanned,
                 }
                 for it in items
             ],
@@ -2275,6 +2360,95 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 item.faces = boxes
                 item.face_scanned = True
 
+    async def _enrich_google_items_background(self, data: dict[str, Any]) -> None:
+        """Cache optional Google metadata without delaying or failing the playlist."""
+        from . import google_scraper
+
+        jobs = []
+        for item in data.get("items", []):
+            if self.google_metadata_enabled and item.source_id and item.camera_metadata is None:
+                jobs.append((item, False))
+            if self.google_location_enabled and not item.google_location_scanned:
+                jobs.append((item, True))
+        if not jobs:
+            try:
+                if self.google_reverse_geocode_enabled:
+                    await self._geocode_items_background(data)
+            finally:
+                self._enrich_progress["phase"] = "done"
+            return
+        failures = 0
+        completed = 0
+        next_request = 0.0
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession(
+                cookie_jar=aiohttp.DummyCookieJar(), trust_env=False,
+            ) as session:
+                keys = None
+                for item, location_job in jobs:
+                    delay = next_request - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    try:
+                        if location_job:
+                            header = await google_scraper.fetch_photo_location_header(session, item.url)
+                            metadata = await self.hass.async_add_executor_job(partial(
+                                _read_exif_from_bytes, header, None, strict=True,
+                            ))
+                            latitude = metadata.get("latitude")
+                            longitude = metadata.get("longitude")
+                            if (
+                                all(type(value) in (int, float) and math.isfinite(value)
+                                    for value in (latitude, longitude))
+                                and -90 <= latitude <= 90 and -180 <= longitude <= 180
+                                and (abs(latitude) > 1e-6 or abs(longitude) > 1e-6)
+                            ):
+                                item.latitude, item.longitude = latitude, longitude
+                            else:
+                                item.latitude = item.longitude = None
+                            item.location = None
+                            item.google_location_scanned = True
+                        else:
+                            if keys is None:
+                                keys = await google_scraper.fetch_metadata_keys(session, self.album_url)
+                            metadata = await google_scraper.fetch_photo_metadata(
+                                session, keys, item.source_id,
+                            )
+                            item.description = metadata.pop("description", None)
+                            item.camera_metadata = metadata
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:
+                        failures += 1
+                        _LOGGER.debug(
+                            "Google photo metadata unavailable (%s, status=%s)",
+                            type(err).__name__, getattr(err, "status", None),
+                        )
+                        if failures >= 3 or getattr(err, "status", None) in (401, 403, 429):
+                            break
+                    else:
+                        failures = 0
+                        completed += 1
+                        if not self._needs_enrichment(item):
+                            self._enrich_progress["exif_done"] += 1
+                        if completed == 1 or completed % 10 == 0:
+                            await self._save_cached_items(data)
+                            self.async_set_updated_data(data)
+                    finally:
+                        next_request = loop.time() + _GOOGLE_METADATA_INTERVAL
+            if self.google_reverse_geocode_enabled:
+                await self._geocode_items_background(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.debug("Google photo enrichment stopped (%s)", type(err).__name__)
+        finally:
+            self._enrich_progress["phase"] = "done"
+            await self._save_cached_items(data)
+            if completed:
+                self.async_set_updated_data(data)
+
     async def _enrich_items_background(self, data: dict[str, Any]) -> None:
         """Read EXIF for unscanned local files, then reverse-geocode.
 
@@ -2398,6 +2572,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         the GPS coordinates themselves. Successful labels are written
         back into the items in-place and persisted via the items cache.
         """
+        if getattr(self, "provider", None) == PROVIDER_GOOGLE_SHARED and not self.google_reverse_geocode_enabled:
+            return
         if not bool(
             self.entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE)
             if hasattr(self.entry, "options") and self.entry.options is not None

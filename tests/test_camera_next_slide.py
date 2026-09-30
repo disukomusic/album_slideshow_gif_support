@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import Counter, deque
 import random
 import types
 
+import pytest
 from PIL import Image
 
 from custom_components.album_slideshow import camera
@@ -103,6 +104,79 @@ def _make_cam(depth: int = 2, paused: bool = False):
 def test_navigation_buffer_defaults_to_two_slides():
     assert DEFAULT_NAVIGATION_BUFFER_SIZE == 2
     assert SlideshowStore().navigation_buffer_size == 2
+
+
+def _dated_items(count=20):
+    return [types.SimpleNamespace(url=f"photo-{index}", captured_at=index * 1000000) for index in range(count)]
+
+
+@pytest.mark.parametrize("bias", [100, -100])
+def test_age_bias_changes_frequency_and_avoids_immediate_repeats(bias):
+    cam = _make_cam()
+    cam.store = SlideshowStore(order_mode=ORDER_RANDOM, shuffle_age_bias=bias)
+    items = _dated_items()
+    counts = Counter()
+    previous = cam._index
+    for _ in range(6000):
+        cam._do_advance(len(items), items)
+        assert cam._index != previous
+        counts[cam._index] += 1
+        previous = cam._index
+
+    oldest = sum(counts[index] for index in range(5))
+    newest = sum(counts[index] for index in range(15, 20))
+    assert newest > oldest * 2 if bias > 0 else oldest > newest * 2
+    assert len(counts) == len(items)
+
+
+def test_neutral_age_bias_keeps_original_random_cycle_exactly():
+    control = _make_cam()
+    control.store.order_mode = ORDER_RANDOM
+    changed = _make_cam()
+    changed.store = SlideshowStore(order_mode=ORDER_RANDOM, shuffle_age_bias=0)
+    items = _dated_items()
+    for _ in range(100):
+        control._do_advance(len(items), items)
+        changed._do_advance(len(items), items)
+        assert control._capture_cursor() == changed._capture_cursor()
+
+
+def test_age_bias_is_ignored_for_nonrandom_order():
+    cam = _make_cam()
+    cam.store = SlideshowStore(order_mode=ORDER_ALBUM, shuffle_age_bias=100)
+    items = _dated_items()
+    for expected in range(1, len(items)):
+        cam._do_advance(len(items), items)
+        assert cam._index == expected
+
+
+def test_age_bias_cursors_replay_without_mutating_live_state():
+    cam = _make_cam()
+    cam.store = SlideshowStore(order_mode=ORDER_RANDOM, shuffle_age_bias=80)
+    cam.hass = object()
+    cam.coordinator = object()
+    cam._download_cache = camera._DownloadCache(1024)
+    initial = cam._capture_cursor()
+    first = cam._make_renderer(initial)
+    replay = cam._make_renderer(initial)
+    items = _dated_items()
+    for _ in range(30):
+        first._do_advance(len(items), items)
+        replay._do_advance(len(items), items)
+        assert first._capture_cursor() == replay._capture_cursor()
+    assert cam._capture_cursor() == initial
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_age_bias_works_with_tiny_playlists(count):
+    cam = _make_cam()
+    cam.store = SlideshowStore(order_mode=ORDER_RANDOM, shuffle_age_bias=100)
+    items = _dated_items(count)
+    for _ in range(30):
+        previous = cam._index
+        cam._do_advance(count, items)
+        assert 0 <= cam._index < count
+        assert count == 1 or previous != cam._index
 
 
 def test_buffer_depth_clamps_to_supported_range():

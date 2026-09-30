@@ -205,3 +205,39 @@ _selector.SelectSelectorConfig = lambda **kw: kw  # type: ignore[attr-defined]
 _selector.SelectSelectorMode = types.SimpleNamespace(DROPDOWN="dropdown", LIST="list")  # type: ignore[attr-defined]
 _selector.SelectSelector = _SelectorBase  # type: ignore[attr-defined]
 _selector.BooleanSelector = _SelectorBase  # type: ignore[attr-defined]
+
+
+_make_stub(
+    "homeassistant.components.number", "homeassistant.components.select",
+    "homeassistant.helpers.restore_state",
+)
+import homeassistant.components.number as _number
+import homeassistant.components.select as _select
+import homeassistant.helpers.restore_state as _restore_state
+
+
+class _RestoreEntity:
+    async def async_added_to_hass(self):
+        pass
+
+    async def async_get_last_state(self):
+        return None
+
+    def async_write_ha_state(self):
+        pass
+
+
+class _NumberEntity:
+    pass
+
+
+class _SelectEntity:
+    @property
+    def options(self):
+        return self._attr_options
+
+
+_number.NumberEntity = _NumberEntity
+_number.NumberMode = types.SimpleNamespace(BOX="box", SLIDER="slider")
+_select.SelectEntity = _SelectEntity
+_restore_state.RestoreEntity = _RestoreEntity

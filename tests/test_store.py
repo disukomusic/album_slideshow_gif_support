@@ -2,10 +2,62 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from custom_components.album_slideshow import store as store_module
+from custom_components.album_slideshow.number import CustomLookbackDaysNumber, ShuffleAgeBiasNumber
+from custom_components.album_slideshow.select import DateFilterSelect
+from custom_components.album_slideshow.const import DATE_FILTER_CUSTOM
+
+
+@pytest.mark.parametrize(("control_type", "field", "value", "expected"), [
+    (CustomLookbackDaysNumber, "custom_lookback_days", 1825, 1825),
+    (CustomLookbackDaysNumber, "custom_lookback_days", 0, 1),
+    (CustomLookbackDaysNumber, "custom_lookback_days", 100000, 36500),
+    (ShuffleAgeBiasNumber, "shuffle_age_bias", -60, -60),
+    (ShuffleAgeBiasNumber, "shuffle_age_bias", 500, 100),
+    (ShuffleAgeBiasNumber, "shuffle_age_bias", -500, -100),
+])
+def test_playlist_controls_update_and_restore(control_type, field, value, expected):
+    store = store_module.SlideshowStore()
+    notifications = []
+    store.add_listener(lambda: notifications.append(True))
+    control = control_type(SimpleNamespace(entry_id="album"), store)
+    asyncio.run(control.async_set_native_value(value))
+    assert getattr(store, field) == expected
+    assert control.native_value == expected
+    assert notifications == [True]
+    restored_store = store_module.SlideshowStore()
+    restored = control_type(SimpleNamespace(entry_id="album"), restored_store)
+    restored.async_get_last_state = AsyncMock(return_value=SimpleNamespace(state=str(expected)))
+    asyncio.run(restored.async_added_to_hass())
+    assert getattr(restored_store, field) == expected
+
+
+@pytest.mark.parametrize("control_type", [CustomLookbackDaysNumber, ShuffleAgeBiasNumber])
+@pytest.mark.parametrize("state", ["unknown", "unavailable", "invalid", "nan", "inf"])
+def test_playlist_controls_ignore_invalid_restored_values(control_type, state):
+    store = store_module.SlideshowStore()
+    control = control_type(SimpleNamespace(entry_id="album"), store)
+    default = control.native_value
+    control.async_get_last_state = AsyncMock(return_value=SimpleNamespace(state=state))
+    asyncio.run(control.async_added_to_hass())
+    assert control.native_value == default
+
+
+def test_custom_date_filter_option_can_be_selected_and_restored():
+    store = store_module.SlideshowStore()
+    control = DateFilterSelect(SimpleNamespace(entry_id="album"), store)
+    assert DATE_FILTER_CUSTOM in control.options
+    asyncio.run(control.async_select_option(DATE_FILTER_CUSTOM))
+    assert store.date_filter == DATE_FILTER_CUSTOM
+    store.date_filter = "off"
+    control.async_get_last_state = AsyncMock(return_value=SimpleNamespace(state=DATE_FILTER_CUSTOM))
+    asyncio.run(control.async_added_to_hass())
+    assert store.date_filter == DATE_FILTER_CUSTOM
 
 
 @pytest.fixture

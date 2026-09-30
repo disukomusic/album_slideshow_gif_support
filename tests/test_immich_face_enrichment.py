@@ -272,6 +272,7 @@ def test_v1120_focus_cache_is_reenriched_without_losing_playlist():
 def test_face_enrichment_does_not_rescan_other_providers(provider):
     coord = _coordinator('{"people": ["p1"]}')
     coord.provider = provider
+    coord.entry.options = {"google_metadata": False}
     item = _item()
     item.exif_scanned = True
     assert coord._needs_enrichment(item) is False

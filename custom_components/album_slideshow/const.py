@@ -12,6 +12,15 @@ CONF_ALBUM_NAME = "album_name"
 CONF_LOCAL_PATH = "local_path"
 CONF_RECURSIVE = "recursive"
 CONF_IMAGE_CACHE_MB = "image_cache_mb"
+CONF_GOOGLE_METADATA = "google_metadata"
+DEFAULT_GOOGLE_METADATA = True
+CONF_GOOGLE_LOCATION = "google_location"
+DEFAULT_GOOGLE_LOCATION = False
+DEFAULT_GOOGLE_REVERSE_GEOCODE = False
+CAMERA_METADATA_FIELDS = (
+    "camera_make", "camera_model", "focal_length_mm", "aperture_f_number",
+    "iso", "exposure_time_seconds",
+)
 # Media Source provider: a ``media-source://...`` content id pointing at a
 # folder-like node (e.g. an Immich people/album view, or local media). The
 # coordinator browses it, collects the image children, and resolves each to
@@ -258,6 +267,9 @@ DATE_FILTER_OFF = "off"
 DATE_FILTER_LAST_7 = "last_7_days"
 DATE_FILTER_LAST_30 = "last_30_days"
 DATE_FILTER_LAST_365 = "last_365_days"
+DATE_FILTER_CUSTOM = "custom_days"
+DEFAULT_CUSTOM_LOOKBACK_DAYS = 365
+MAX_CUSTOM_LOOKBACK_DAYS = 36500
 DATE_FILTER_THIS_MONTH = "this_month"
 DATE_FILTER_THIS_YEAR = "this_year"
 DATE_FILTER_ON_THIS_DAY = "on_this_day"
@@ -267,6 +279,7 @@ DATE_FILTER_OPTIONS = [
     DATE_FILTER_LAST_7,
     DATE_FILTER_LAST_30,
     DATE_FILTER_LAST_365,
+    DATE_FILTER_CUSTOM,
     DATE_FILTER_THIS_MONTH,
     DATE_FILTER_THIS_YEAR,
     DATE_FILTER_ON_THIS_DAY,
@@ -293,6 +306,7 @@ DEFAULT_REFRESH_HOURS = 24
 DEFAULT_FILL_MODE = FILL_BLUR
 DEFAULT_ORIENTATION_MISMATCH_MODE = ORIENTATION_MISMATCH_PAIR
 DEFAULT_ORDER_MODE = ORDER_RANDOM
+DEFAULT_SHUFFLE_AGE_BIAS = 0
 DEFAULT_ASPECT_RATIO = "16:9"
 DEFAULT_PAIR_DIVIDER_PX = 8
 DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"

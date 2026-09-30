@@ -20,6 +20,11 @@ from .const import (
     CONF_PROVIDER,
     CONF_ALBUM_NAME,
     CONF_ALBUM_URL,
+    CONF_GOOGLE_METADATA,
+    DEFAULT_GOOGLE_METADATA,
+    CONF_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_REVERSE_GEOCODE,
     CONF_LOCAL_PATH,
     CONF_MEDIA_CONTENT_ID,
     CONF_RECURSIVE,
@@ -396,6 +401,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return LocalFolderOptionsFlow()
         if config_entry.data.get(CONF_PROVIDER) == PROVIDER_IMMICH:
             return ImmichOptionsFlow()
+        if config_entry.data.get(CONF_PROVIDER) == PROVIDER_GOOGLE_SHARED:
+            return GoogleOptionsFlow()
         return _NoOptionsFlow()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -1350,6 +1357,38 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "example_url": "https://albums.ente.io/?t=TOKEN#KEY"
             },
+        )
+
+
+class GoogleOptionsFlow(config_entries.OptionsFlow):
+    """Control anonymous Google photo metadata enrichment."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        return await self.async_step_google_metadata(user_input)
+
+    async def async_step_google_metadata(
+        self, user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        defaults = {
+            CONF_GOOGLE_METADATA: DEFAULT_GOOGLE_METADATA,
+            CONF_GOOGLE_LOCATION: DEFAULT_GOOGLE_LOCATION,
+            CONF_REVERSE_GEOCODE: DEFAULT_GOOGLE_REVERSE_GEOCODE,
+        }
+        if user_input is not None:
+            options = {
+                **self.config_entry.options,
+                **{
+                    field: bool(user_input.get(field, self.config_entry.options.get(field, default)))
+                    for field, default in defaults.items()
+                },
+            }
+            return self.async_create_entry(title="", data=options)
+        return self.async_show_form(
+            step_id="google_metadata",
+            data_schema=vol.Schema({
+                vol.Required(field, default=bool(self.config_entry.options.get(field, default))): bool
+                for field, default in defaults.items()
+            }),
         )
 
 

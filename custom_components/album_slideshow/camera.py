@@ -21,6 +21,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
+    CAMERA_METADATA_FIELDS,
+    DEFAULT_CUSTOM_LOOKBACK_DAYS,
+    DEFAULT_SHUFFLE_AGE_BIAS,
+    DEFAULT_MISSING_DATE_MODE,
     MAX_RESOLUTION_SHORT_EDGE,
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_AVOID,
@@ -110,6 +114,14 @@ def _ts_to_iso(ts_ms: int | None) -> str | None:
 def _utc_now_iso() -> str:
     """Return the current time as an ISO-8601 UTC string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _camera_metadata_attributes(item: MediaItem | None) -> dict[str, Any]:
+    metadata = getattr(item, "camera_metadata", None)
+    return {
+        field: metadata.get(field) if isinstance(metadata, dict) else None
+        for field in CAMERA_METADATA_FIELDS
+    }
 
 
 def _item_faces(item: MediaItem | None) -> tuple[ip.FaceBox, ...] | None:
@@ -361,12 +373,14 @@ class AlbumSlideshowCamera(Camera):
             "captured_at_primary": captured_at,
             "uploaded_at": _ts_to_iso(getattr(cur, "uploaded_at", None)),
             "byte_size": getattr(cur, "byte_size", None),
-            # GPS + reverse-geocoded label come from EXIF for local-folder
-            # entries; Google albums leave these as ``None``.
             "latitude": getattr(cur, "latitude", None),
             "longitude": getattr(cur, "longitude", None),
             "location": getattr(cur, "location", None),
             "description": getattr(cur, "description", None),
+            **_camera_metadata_attributes(cur),
+            "google_metadata_enabled": bool(getattr(self.coordinator, "google_metadata_enabled", False)),
+            "google_location_enabled": bool(getattr(self.coordinator, "google_location_enabled", False)),
+            "google_reverse_geocode_enabled": bool(getattr(self.coordinator, "google_reverse_geocode_enabled", False)),
             # Structured per-image caption metadata. A single-element list for
             # normal slides; two elements (top/left first) for paired slides,
             # so the card can overlay an accurate date/location on each half.
@@ -379,6 +393,8 @@ class AlbumSlideshowCamera(Camera):
             "portrait_mode": self.store.portrait_mode,
             "order_mode": self.store.order_mode,
             "date_filter": self.store.date_filter,
+            "custom_lookback_days": int(self.store.custom_lookback_days),
+            "shuffle_age_bias": int(self.store.shuffle_age_bias),
             "missing_date_mode": self.store.missing_date_mode,
             "paused": bool(self.store.paused),
             "refresh_hours": int(self.store.refresh_hours),
@@ -421,6 +437,7 @@ class AlbumSlideshowCamera(Camera):
                 "latitude": getattr(cur, "latitude", None),
                 "longitude": getattr(cur, "longitude", None),
                 "description": getattr(cur, "description", None),
+                **_camera_metadata_attributes(cur),
             }
         ]
 
@@ -457,6 +474,7 @@ class AlbumSlideshowCamera(Camera):
         cache_key = (
             id(raw),
             self.store.date_filter,
+            getattr(self.store, "custom_lookback_days", DEFAULT_CUSTOM_LOOKBACK_DAYS),
             self.store.missing_date_mode,
             self.store.order_mode,
             self.store.hidden_revision,
@@ -468,6 +486,7 @@ class AlbumSlideshowCamera(Camera):
             [item for item in raw if item.photo_id and item.photo_id not in self.store.hidden_photo_ids]
             if self.store.hidden_photo_ids else raw,
             mode=self.store.date_filter,
+            lookback_days=getattr(self.store, "custom_lookback_days", DEFAULT_CUSTOM_LOOKBACK_DAYS),
             missing_date=self.store.missing_date_mode,
         )
         ordered = playlist.order_items(filtered, self.store.order_mode)
@@ -1132,7 +1151,8 @@ class AlbumSlideshowCamera(Camera):
             self._index = (self._index + 1) % count
             return
 
-        self._index = self._next_random_index(count)
+        bias = getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
+        self._index = self._next_age_weighted_index(items, bias) if bias else self._next_random_index(count)
         cur_url = items[self._index].url
         self._recent_urls.append(cur_url)
         keep = min(20, max(1, count - 1))
@@ -1227,6 +1247,7 @@ class AlbumSlideshowCamera(Camera):
                                 "latitude": getattr(cur, "latitude", None),
                                 "longitude": getattr(cur, "longitude", None),
                                 "description": getattr(cur, "description", None),
+                                **_camera_metadata_attributes(cur),
                             },
                             {
                                 "captured_at": _ts_to_iso(getattr(other_item, "captured_at", None)),
@@ -1234,6 +1255,7 @@ class AlbumSlideshowCamera(Camera):
                                 "latitude": getattr(other_item, "latitude", None),
                                 "longitude": getattr(other_item, "longitude", None),
                                 "description": getattr(other_item, "description", None),
+                                **_camera_metadata_attributes(other_item),
                             },
                         ]
                         pair_meta = [f["captured_at"] for f in pair_frames]
@@ -1442,6 +1464,23 @@ class AlbumSlideshowCamera(Camera):
             ip.safe_close(img)
 
         return None
+
+    def _next_age_weighted_index(self, items: list[MediaItem], bias: int) -> int:
+        weights = playlist.age_weights(
+            items, bias, missing_date=getattr(self.store, "missing_date_mode", DEFAULT_MISSING_DATE_MODE),
+        )
+        count = len(items)
+        if count <= 1 or min(weights) == max(weights):
+            return self._next_random_index(count)
+        cooldown = min(5, max(1, count // 10))
+        recent = set(self._recent_urls[-cooldown:])
+        candidates = [
+            index for index, item in enumerate(items)
+            if index != self._index and item.url not in recent
+        ]
+        if not candidates:
+            candidates = [index for index in range(count) if index != self._index]
+        return self._rng.choices(candidates, weights=[weights[index] for index in candidates], k=1)[0]
 
     def _next_random_index(self, count: int) -> int:
         if count <= 1:
