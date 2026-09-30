@@ -80,6 +80,7 @@ def _make_cam(depth: int = 2, paused: bool = False):
     cam._navigation_lock = asyncio.Lock()
     cam._navigation_pending = 0
     cam._interrupt_event = asyncio.Event()
+    cam._slide_deadline = None
     cam._next_ready_event = asyncio.Event()
     cam._timeline_generation = 0
     cam._timeline_dirty = False
@@ -532,6 +533,123 @@ def test_wait_returns_immediately_when_timeline_is_dirty():
 def test_wait_times_out_when_idle():
     cam = _make_cam()
     assert asyncio.run(cam._wait_or_interrupt(timeout=0.01)) is False
+
+
+@pytest.mark.parametrize("interrupt_at_deadline", [False, True])
+def test_metadata_updates_do_not_restart_slide_timer(monkeypatch, interrupt_at_deadline):
+    cam = _make_cam(depth=0)
+    cam._effective_items = lambda: [object(), object()]
+    elapsed = 0.0
+    waits = []
+    advances = []
+
+    async def render(cursor, _items, *, advance):
+        if advance:
+            advances.append(elapsed)
+        return _frame((cursor.index + int(advance)) % 2)
+
+    async def wait(timeout):
+        nonlocal elapsed
+        if advances or len(waits) >= 9:
+            raise asyncio.CancelledError
+        waits.append(timeout)
+        elapsed += min(10.0, timeout)
+        if timeout <= 0.0 or (timeout <= 10.0 and not interrupt_at_deadline):
+            return False
+        cam._invalidate_timeline()
+        return True
+
+    cam._render_available_frame = render
+    cam._wait_or_interrupt = wait
+
+    async def run():
+        with monkeypatch.context() as clock:
+            clock.setattr(asyncio.get_running_loop(), "time", lambda: elapsed)
+            with pytest.raises(asyncio.CancelledError):
+                await cam._render_loop()
+
+    asyncio.run(run())
+
+    assert advances == [60.0]
+    assert waits == [60.0, 50.0, 40.0, 30.0, 20.0, 10.0] + ([0.0] if interrupt_at_deadline else [])
+    assert cam._current_frame.cursor.index == 1
+
+
+def test_coordinator_keeps_deadline_but_user_settings_reset_it():
+    listeners = []
+    store = SlideshowStore(navigation_buffer_size=0)
+    coordinator = types.SimpleNamespace(async_add_listener=listeners.append)
+    cam = camera.AlbumSlideshowCamera(
+        _FakeHass(), types.SimpleNamespace(entry_id="test", title="Test"), coordinator, store,
+    )
+    cam.async_write_ha_state = lambda: None
+    cam._slide_deadline = 60.0
+
+    listeners[0]()
+
+    assert cam._timeline_dirty is True
+    assert cam._slide_deadline == 60.0
+    for field, value in [("slide_interval", 20), ("paused", True), ("paused", False)]:
+        cam._slide_deadline = 60.0
+        setattr(store, field, value)
+        store.notify()
+        assert cam._slide_deadline is None
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+@pytest.mark.parametrize("manual_at", [10.0, 60.0])
+def test_manual_navigation_gets_full_interval_without_double_advance(monkeypatch, direction, manual_at):
+    cam = _make_cam()
+    cam._effective_items = lambda: [object(), object(), object()]
+    cam._apply_frame(_frame(1))
+    cam._previous_frames.append(_frame(0))
+    elapsed = 0.0
+    manual_finished = None
+    waits = []
+    displayed = []
+    apply_frame = cam._apply_frame
+
+    def display(frame):
+        displayed.append((elapsed, frame.cursor.index))
+        apply_frame(frame)
+
+    cam._apply_frame = display
+
+    async def render(cursor, _items, *, advance):
+        nonlocal elapsed
+        if manual_finished is None:
+            elapsed += 15.0
+        return _frame((cursor.index + int(advance)) % 3)
+
+    async def wait(timeout):
+        nonlocal elapsed, manual_finished
+        if len(waits) >= 2:
+            raise asyncio.CancelledError
+        waits.append(timeout)
+        if len(waits) == 1:
+            elapsed = manual_at
+            await cam._async_navigate(direction)
+            manual_finished = elapsed
+            return manual_at < timeout
+        elapsed += timeout
+        return False
+
+    cam._render_available_frame = render
+    cam._wait_or_interrupt = wait
+
+    async def run():
+        with monkeypatch.context() as clock:
+            clock.setattr(asyncio.get_running_loop(), "time", lambda: elapsed)
+            with pytest.raises(asyncio.CancelledError):
+                await cam._render_loop()
+
+    asyncio.run(run())
+
+    assert waits == [60.0, 60.0]
+    assert displayed == [
+        (manual_finished, 2 if direction > 0 else 0),
+        (manual_finished + 60.0, 0 if direction > 0 else 1),
+    ]
 
 
 def test_paused_wait_wakes_for_manual_navigation():

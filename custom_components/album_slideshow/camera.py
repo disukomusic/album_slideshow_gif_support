@@ -248,6 +248,7 @@ class AlbumSlideshowCamera(Camera):
         self._frame_id: int = 0
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
+        self._slide_deadline: float | None = None
         # Navigation runs directly in the button/service coroutine. The lock
         # serialises rapid presses while buffered swaps remain independent of
         # the background timer loop.
@@ -284,6 +285,7 @@ class AlbumSlideshowCamera(Camera):
         def _on_store_change() -> None:
             self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
             self._effective_cache = None
+            self._slide_deadline = None
             self._invalidate_timeline()
 
         store.add_listener(_on_store_change)
@@ -510,6 +512,7 @@ class AlbumSlideshowCamera(Camera):
         self._last_nav_outcome = "pending"
         self._last_nav_error = None
         # Wake the timer loop so the manual frame starts a fresh interval.
+        self._slide_deadline = None
         self._interrupt_event.set()
         self.async_write_ha_state()
 
@@ -539,6 +542,8 @@ class AlbumSlideshowCamera(Camera):
             )
         finally:
             self._navigation_pending -= 1
+            self._slide_deadline = None
+            self._interrupt_event.set()
             self.async_write_ha_state()
 
     async def async_force_refresh(self) -> None:
@@ -1062,6 +1067,7 @@ class AlbumSlideshowCamera(Camera):
 
     async def _render_loop(self, initial_delay: float = 0.0) -> None:
         """Display buffered frames on command/timer and refill them in the background."""
+        loop = asyncio.get_running_loop()
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)
 
@@ -1092,6 +1098,8 @@ class AlbumSlideshowCamera(Camera):
 
         while True:
             try:
+                if self._slide_deadline is None:
+                    self._slide_deadline = loop.time() + float(int(self.store.slide_interval))
                 if self._timeline_dirty:
                     async with self._navigation_lock:
                         if self._timeline_dirty:
@@ -1099,16 +1107,22 @@ class AlbumSlideshowCamera(Camera):
                     continue
 
                 interrupted = await self._wait_or_interrupt(
-                    float(int(self.store.slide_interval))
+                    max(0.0, self._slide_deadline - loop.time())
                 )
                 if not interrupted and not self.store.paused:
                     async with self._navigation_lock:
-                        if not self._timeline_dirty:
+                        if (
+                            not self._timeline_dirty
+                            and self._slide_deadline is not None
+                            and loop.time() >= self._slide_deadline
+                        ):
                             await self._show_next_frame()
+                            self._slide_deadline = loop.time() + float(int(self.store.slide_interval))
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as err:
+                self._slide_deadline = None
                 self._consecutive_failures += 1
                 _LOGGER.warning(
                     "Album Slideshow: buffered navigation/render failed (attempt %d): %s",
