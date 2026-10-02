@@ -309,6 +309,18 @@ class AlbumSlideshowCamera(Camera):
         return "mdi:folder-multiple-image"
 
     @property
+    def content_type(self) -> str:
+        """Return the exact content type of the current frame."""
+        if self._framebuffer:
+            if self._framebuffer.startswith(b"GIF8"):
+                return "image/gif"
+            if self._framebuffer.startswith(b"\x89PNG"):
+                return "image/png"
+            if self._framebuffer.startswith(b"RIFF") and b"WEBP" in self._framebuffer[8:12]:
+                return "image/webp"
+        return "image/jpeg"
+
+    @property
     def extra_state_attributes(self):
         data = self.coordinator.data or {}
         items: list[MediaItem] = self._effective_items()
