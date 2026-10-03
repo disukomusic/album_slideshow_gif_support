@@ -70,11 +70,12 @@ album's **Configure** button. Location has two independent consent controls:
 | **Read original photo GPS (opt-in)** | Off | Fetches up to 256 KB of each original photo to extract embedded GPS into the existing `latitude` / `longitude` camera attributes |
 | **Look up GPS place names via OpenStreetMap (opt-in)** | Off | When GPS reading is also enabled, sends coordinates to the public Nominatim service and fills the existing `location` attribute and caption field |
 
-**Original files can retain precise GPS even when Google Photos hides
-locations from shared viewers.** These settings are separate from Google's
-sharing controls. Only enable original GPS reading if you intend to expose
-that embedded location in Home Assistant. No Google login is used, and this
-does not change the source photos or their Google sharing settings.
+**Google only includes GPS in shared originals when location sharing is
+turned on for the album.** Turn it on in the album's options in Google Photos;
+anyone with the album link can then see photo locations. Only enable original
+GPS reading if you intend to expose that location in Home Assistant. No Google
+login is used, and this does not change the source photos or their Google
+sharing settings.
 
 Coordinates and place labels are cached in Home Assistant and included in
 `caption_frames` for each displayed photo. They may also enter recorder history
@@ -86,9 +87,11 @@ history, or backups.
 
 The original header is read separately from the resized slideshow image, in
 the background. Successful scans, including photos with no GPS, are cached by
-photo identity. Failed or truncated reads retry on a later album refresh; the
-integration does not download the full original to work around the header cap.
-Headers larger than the cap or unsupported formats may therefore lack location.
+photo identity, so turning on location sharing later does not rescan them on
+its own: turn **Read original photo GPS** off, save, then turn it back on.
+Failed or truncated reads retry on a later album refresh; the integration does
+not download the full original to work around the header cap. GPS stored beyond
+the cap may therefore be missed.
 This reads embedded camera GPS, not locations added, edited, or estimated in
 Google Photos. No additional per-photo sensors are created.
 

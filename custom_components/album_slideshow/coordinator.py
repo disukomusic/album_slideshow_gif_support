@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
-from functools import partial
 from hashlib import sha256
 import json
 import logging
@@ -469,6 +468,7 @@ _EXIF_GPS_LAT_REF = 1                     # "N" / "S"
 _EXIF_GPS_LAT = 2                         # rational tuple
 _EXIF_GPS_LON_REF = 3                     # "E" / "W"
 _EXIF_GPS_LON = 4                         # rational tuple
+_HEIF_EXIF_RE = re.compile(rb"Exif\x00\x00(?:MM\x00\x2a|II\x2a\x00)")
 
 # Nominatim (OpenStreetMap) is free but rate-limited to 1 request/second
 # per IP and asks integrators to identify themselves with a descriptive
@@ -825,6 +825,54 @@ def _read_exif_from_bytes(
         _LOGGER.debug("EXIF: failed to read image bytes: %s", err)
 
     return out
+
+
+def _read_gps_from_header(data: bytes) -> dict[str, float]:
+    """Read GPS from an original-image prefix; raise ``ValueError`` if it is too short to tell."""
+    if data[:2] == b"\xff\xd8":
+        payload = _jpeg_exif_segment(data)
+    elif data[4:8] == b"ftyp":
+        match = _HEIF_EXIF_RE.search(data)
+        if match is None:
+            raise ValueError("HEIF EXIF not found in header")
+        payload = data[match.start():]
+    else:
+        metadata = _read_exif_from_bytes(data, None, strict=True)
+        return {key: metadata[key] for key in ("latitude", "longitude") if key in metadata}
+    if payload is None:
+        return {}
+
+    from PIL import Image
+
+    try:
+        exif = Image.Exif()
+        exif.load(payload)
+        gps = exif.get_ifd(_EXIF_TAG_GPS_IFD)
+    except Exception:
+        return {}
+    lat = _gps_to_decimal(gps.get(_EXIF_GPS_LAT), gps.get(_EXIF_GPS_LAT_REF))
+    lon = _gps_to_decimal(gps.get(_EXIF_GPS_LON), gps.get(_EXIF_GPS_LON_REF))
+    return {} if lat is None or lon is None else {"latitude": lat, "longitude": lon}
+
+
+def _jpeg_exif_segment(data: bytes) -> bytes | None:
+    pos = 2
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            return None
+        marker = data[pos + 1]
+        if marker == 0xFF:
+            pos += 1
+            continue
+        if marker in (0xD9, 0xDA):
+            return None
+        end = pos + 2 + int.from_bytes(data[pos + 2:pos + 4], "big")
+        if marker == 0xE1 and data[pos + 4:pos + 10] == b"Exif\x00\x00":
+            if end > len(data):
+                raise ValueError("JPEG EXIF segment is truncated")
+            return data[pos + 4:end]
+        pos = end
+    raise ValueError("JPEG header ends before image data")
 
 
 def _format_nominatim_location(payload: dict[str, Any]) -> str | None:
@@ -2393,9 +2441,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     try:
                         if location_job:
                             header = await google_scraper.fetch_photo_location_header(session, item.url)
-                            metadata = await self.hass.async_add_executor_job(partial(
-                                _read_exif_from_bytes, header, None, strict=True,
-                            ))
+                            try:
+                                metadata = await self.hass.async_add_executor_job(
+                                    _read_gps_from_header, header,
+                                )
+                            except Exception as err:
+                                # A photo that cannot be parsed must not stop the scan for the rest.
+                                _LOGGER.debug("Google photo GPS unreadable (%s)", type(err).__name__)
+                                continue
                             latitude = metadata.get("latitude")
                             longitude = metadata.get("longitude")
                             if (

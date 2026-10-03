@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from PIL import Image
 
 from custom_components.album_slideshow import coordinator as coordinator_module
 from custom_components.album_slideshow import google_scraper
@@ -232,7 +234,7 @@ def test_google_options_disclose_location_privacy_in_matching_translations():
     options = strings["options"]["step"]["google_metadata"]
     assert options == translations["options"]["step"]["google_metadata"]
     assert set(options["data"]) == {"google_metadata", "google_location", "reverse_geocode"}
-    for disclosure in ["off by default", "256 KB", "precise GPS", "Google Photos hides", "Nominatim", "history or backups"]:
+    for disclosure in ["off by default", "256 KB", "precise GPS", "location sharing", "Nominatim", "history or backups"]:
         assert disclosure in options["description"]
 
 
@@ -422,6 +424,67 @@ def test_google_truncated_header_does_not_cache_missing_gps(monkeypatch):
 
     assert item.google_location_scanned is False
     assert coord._needs_enrichment(item)
+
+
+_GPS = {"latitude": pytest.approx(37.41667, abs=1e-4), "longitude": pytest.approx(-122.08333, abs=1e-4)}
+
+
+def _gps_exif() -> bytes:
+    exif = Image.Exif()
+    gps = exif.get_ifd(coordinator_module._EXIF_TAG_GPS_IFD)
+    gps[coordinator_module._EXIF_GPS_LAT] = (37.0, 25.0, 0.0)
+    gps[coordinator_module._EXIF_GPS_LAT_REF] = "N"
+    gps[coordinator_module._EXIF_GPS_LON] = (122.0, 5.0, 0.0)
+    gps[coordinator_module._EXIF_GPS_LON_REF] = "W"
+    return exif.tobytes()
+
+
+def _jpeg(exif: bytes | None = None, *, padding: int = 0) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(output, "JPEG", **({"exif": exif} if exif else {}))
+    data = output.getvalue()
+    tables = data.index(b"\xff\xdb")
+    return data[:tables] + (b"\xff\xeb\xff\xff" + bytes(65533)) * padding + data[tables:]
+
+
+def test_google_gps_is_read_when_later_metadata_exceeds_the_header(monkeypatch):
+    coord = _google_coordinator(monkeypatch, enabled=False)
+    coord.entry.options["google_location"] = True
+    header = _jpeg(_gps_exif(), padding=5)[:google_scraper._LOCATION_HEADER_BYTES]
+    monkeypatch.setattr(google_scraper, "fetch_photo_location_header", AsyncMock(return_value=header))
+    item = _google_photo()
+
+    asyncio.run(coord._enrich_google_items_background({"items": [item]}))
+
+    assert item.google_location_scanned is True
+    assert {"latitude": item.latitude, "longitude": item.longitude} == _GPS
+
+
+def test_unreadable_google_photos_do_not_stop_the_gps_scan(monkeypatch):
+    coord = _google_coordinator(monkeypatch, enabled=False)
+    coord.entry.options["google_location"] = True
+    header = AsyncMock(side_effect=[b"unreadable"] * 3 + [_jpeg(_gps_exif())])
+    monkeypatch.setattr(google_scraper, "fetch_photo_location_header", header)
+    items = [_google_photo(str(index)) for index in range(4)]
+
+    asyncio.run(coord._enrich_google_items_background({"items": items}))
+
+    assert header.await_count == 4
+    assert [item.google_location_scanned for item in items] == [False, False, False, True]
+    assert {"latitude": items[3].latitude, "longitude": items[3].longitude} == _GPS
+
+
+def test_google_gps_is_read_from_heic_originals():
+    header = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + bytes(64) + b"\x00\x00\x00\x06" + _gps_exif()
+
+    assert coordinator_module._read_gps_from_header(header) == _GPS
+
+
+def test_google_gps_reader_distinguishes_missing_from_truncated_exif():
+    assert coordinator_module._read_gps_from_header(_jpeg()) == {}
+    for truncated in (_jpeg()[:20], _jpeg(_gps_exif())[:40]):
+        with pytest.raises(ValueError):
+            coordinator_module._read_gps_from_header(truncated)
 
 
 def test_google_location_cache_reuses_photo_identity(monkeypatch):
