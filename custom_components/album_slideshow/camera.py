@@ -320,6 +320,11 @@ class AlbumSlideshowCamera(Camera):
                 return "image/webp"
         return "image/jpeg"
 
+    @content_type.setter
+    def content_type(self, value: str) -> None:
+        """Absorb the default value set by the base Camera class."""
+        pass
+
     @property
     def extra_state_attributes(self):
         data = self.coordinator.data or {}
