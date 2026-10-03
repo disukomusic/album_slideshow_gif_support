@@ -116,7 +116,7 @@ def test_redirect_into_icloud_uses_final_response_hostname(make_camera):
     cam, _response, requests = make_camera()
     source_url = "https://www.icloud.com/image-redirect"
     assert asyncio.run(cam._http_get(source_url)) == b"image-bytes"
-    assert requests == [(source_url, {"headers": None})]
+    assert requests == [(source_url, {"headers": None, "ssl": True})]
 
 
 def test_redirect_away_from_icloud_does_not_inherit_binary_exception(make_camera):

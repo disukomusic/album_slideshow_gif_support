@@ -110,6 +110,22 @@
           "synology_image_size": "Image quality"
         }
       },
+      "ugreen": {
+        "title": "UGREEN NAS (UGOS Photos)",
+        "description": "Experimental: connect to the Photos app on a UGREEN NAS (UGOS Pro). Enter the NAS address including port (e.g. https://192.168.1.10:9443) and an account. This provider talks to an undocumented, reverse-engineered API and may break with future UGOS updates.",
+        "data": {
+          "ugreen_url": "NAS URL",
+          "ugreen_username": "Username",
+          "ugreen_password": "Password"
+        }
+      },
+      "ugreen_select": {
+        "title": "UGREEN album",
+        "description": "Pick the UGOS Photos album to show.",
+        "data": {
+          "ugreen_album_name": "Album"
+        }
+      },
       "nextcloud": {
         "title": "Nextcloud",
         "description": "Choose how to connect: an authenticated WebDAV folder in your Nextcloud files, or a public Nextcloud Photos album share link.",
@@ -173,7 +189,9 @@
       "invalid_nextcloud_url": "That does not look like a Nextcloud Photos public album link.",
       "nextcloud_public_cannot_connect": "Could not connect to that Nextcloud album. Check the link is still valid.",
       "invalid_ente_url": "That does not look like an Ente public album link. It should look like {example_url}, including the part after the #.",
-      "ente_cannot_connect": "Could not open that Ente album. The link may be expired, revoked, or password-protected."
+      "ente_cannot_connect": "Could not open that Ente album. The link may be expired, revoked, or password-protected.",
+      "ugreen_cannot_connect": "Could not connect to the UGREEN NAS. Check the URL, username and password.",
+      "ugreen_no_albums": "No albums were found on this UGREEN NAS."
     }
   },
   "options": {

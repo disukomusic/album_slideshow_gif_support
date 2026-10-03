@@ -89,6 +89,10 @@ from .const import (
     CONF_ENTE_IMAGE_SIZE,
     DEFAULT_ENTE_IMAGE_SIZE,
     ENTE_IMAGE_PREVIEW,
+    CONF_UGREEN_URL,
+    CONF_UGREEN_USERNAME,
+    CONF_UGREEN_PASSWORD,
+    CONF_UGREEN_ALBUM_NAME,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     ENRICHING_PROVIDERS,
@@ -101,6 +105,7 @@ from .const import (
     PROVIDER_SYNOLOGY,
     PROVIDER_NEXTCLOUD,
     PROVIDER_ENTE,
+    PROVIDER_UGREEN,
 )
 from .store import SlideshowStore
 
@@ -1094,9 +1099,17 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Extra headers the camera must send when fetching image bytes
         # (Immich API key). Empty for providers that need no auth.
         self.image_request_headers: dict[str, str] = {}
+        # UGREEN only: its NAS web interface is normally self-signed, so the
+        # camera must skip TLS verification when fetching image bytes for it.
+        self.image_request_verify_ssl: bool = True
         # Ente only: file id -> {key, header, thumbnail}, the material needed
         # to decrypt each image. Rebuilt on every album refresh.
         self._ente_fetch_meta: dict[str, dict[str, Any]] = {}
+        # UGREEN only: logged-in client + selected album, reused by the
+        # background enrichment pass instead of logging in again per photo.
+        self._ugreen_client: Any = None
+        self._ugreen_album_uuid: str | None = None
+        self._ugreen_album_type: int = 1
 
         # Persist the most recent successful album fetch so that a transient
         # network/Google failure doesn't blank the slideshow on restart.
@@ -1172,6 +1185,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_nextcloud()
             elif self.provider == PROVIDER_ENTE:
                 data = await self._update_ente()
+            elif self.provider == PROVIDER_UGREEN:
+                data = await self._update_ugreen()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -1993,6 +2008,97 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "items": items,
         }
 
+    async def _update_ugreen(self) -> dict[str, Any]:
+        """Fetch photos from a UGREEN NAS UGOS Photos album.
+
+        Logs in fresh on every refresh, like the Synology provider. The
+        album is resolved by name each time, so a renamed/recreated album
+        that keeps the same name needs no reconfiguration.
+        """
+        from . import ugreen as ugr_api
+
+        url = self.entry.data.get(CONF_UGREEN_URL)
+        username = self.entry.data.get(CONF_UGREEN_USERNAME)
+        password = self.entry.data.get(CONF_UGREEN_PASSWORD)
+        album_name = self.entry.data.get(CONF_UGREEN_ALBUM_NAME)
+        if not url or not username or not password or not album_name:
+            raise UpdateFailed("UGREEN provider is missing URL, credentials or album")
+
+        client = ugr_api.UGreenClient(self.hass, url, username, password)
+        try:
+            await client.async_login()
+            albums = await client.async_list_albums()
+        except ugr_api.UGreenAuthError as err:
+            raise UpdateFailed(f"UGREEN login failed: {err}") from err
+        except ugr_api.UGreenApiError as err:
+            raise UpdateFailed(f"Error querying UGREEN Photos: {err}") from err
+
+        album = ugr_api.find_album_by_name(albums, album_name)
+        if album is None:
+            raise UpdateFailed(f"UGREEN album '{album_name}' was not found")
+        album_uuid = album["album_uuid"]
+        album_type = album.get("album_type", ugr_api.ALBUM_TYPE_REGULAR)
+
+        try:
+            photos = await client.async_list_album_pictures(album_uuid, album_type)
+        except ugr_api.UGreenApiError as err:
+            raise UpdateFailed(f"Error listing UGREEN album photos: {err}") from err
+
+        if not photos:
+            raise UpdateFailed(f"No images found in UGREEN album '{album_name}'")
+
+        # Stored so the camera can fetch image bytes server-side (session
+        # cookie) and skip TLS verification for this NAS's self-signed cert.
+        self.image_request_headers = dict(client.image_headers)
+        self.image_request_verify_ssl = False
+        # Kept for the background enrichment pass (GPS/address lookups),
+        # which needs a logged-in client and the album context per photo.
+        self._ugreen_client = client
+        self._ugreen_album_uuid = album_uuid
+        self._ugreen_album_type = album_type
+
+        static_token = client.static_token
+        items: list[MediaItem] = []
+        for p in photos:
+            picture_id = p.get("picture_id")
+            if picture_id is None:
+                continue
+            meta = ugr_api.parse_photo_meta(p)
+            items.append(
+                MediaItem(
+                    url=ugr_api.build_image_url(
+                        client.base_url,
+                        picture_id,
+                        album_uuid,
+                        static_token,
+                        source_album_type=album_type,
+                        upload_time=p.get("upload_time", 0),
+                    ),
+                    width=meta.get("width"),
+                    height=meta.get("height"),
+                    mime_type=None,
+                    filename=p.get("file_name"),
+                    captured_at=meta.get("captured_at"),
+                    byte_size=meta.get("byte_size"),
+                    latitude=None,
+                    longitude=None,
+                    location=None,
+                    description=None,
+                    source_id=str(picture_id),
+                    # GPS/address isn't in this listing - the background
+                    # enrichment pass fills it in via picture/info.
+                    exif_scanned=False,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any UGREEN images")
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
     async def _update_nextcloud(self) -> dict[str, Any]:
         """List photos from Nextcloud, dispatching on the configured auth mode."""
         mode = self.entry.data.get(
@@ -2502,6 +2608,40 @@ class AlbumCoordinator(DataUpdateCoordinator):
             if completed:
                 self.async_set_updated_data(data)
 
+    async def _enrich_ugreen_item(self, item: MediaItem) -> None:
+        """Fetch GPS coordinates and a location label for one UGREEN photo.
+
+        Reuses the client stashed by ``_update_ugreen`` instead of logging in
+        again per photo. The image URL changes every refresh (fresh login),
+        so ``_merge_prior_enrichment`` can't carry this forward - every photo
+        is re-fetched each refresh.
+        """
+        from . import ugreen as ugr_api
+
+        client = self._ugreen_client
+        if client is None or not item.source_id or not self._ugreen_album_uuid:
+            item.exif_scanned = True
+            return
+        try:
+            info = await client.async_get_picture_info(
+                item.source_id, self._ugreen_album_uuid, self._ugreen_album_type
+            )
+        except asyncio.CancelledError:
+            raise
+        except ugr_api.UGreenApiError as err:
+            _LOGGER.debug(
+                "UGREEN: picture/info failed for %s: %s", item.source_id, err
+            )
+            item.exif_scanned = True
+            return
+        meta = ugr_api.parse_picture_location(info)
+        if "latitude" in meta and "longitude" in meta:
+            item.latitude = meta["latitude"]
+            item.longitude = meta["longitude"]
+        if "location" in meta:
+            item.location = meta["location"]
+        item.exif_scanned = True
+
     async def _enrich_items_background(self, data: dict[str, Any]) -> None:
         """Read EXIF for unscanned local files, then reverse-geocode.
 
@@ -2553,6 +2693,24 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         raise
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.debug("Nextcloud enrich error: %s", err)
+                        item.exif_scanned = True
+                    scanned_since_save += 1
+                    self._enrich_progress["exif_done"] = (
+                        self._enrich_progress.get("exif_done", 0) + 1
+                    )
+                    if scanned_since_save >= _EXIF_BATCH_SAVE:
+                        scanned_since_save = 0
+                        await self._save_cached_items(data)
+                        self.async_set_updated_data(data)
+                    continue
+
+                if self.provider == PROVIDER_UGREEN:
+                    try:
+                        await self._enrich_ugreen_item(item)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.debug("UGREEN enrich error: %s", err)
                         item.exif_scanned = True
                     scanned_since_save += 1
                     self._enrich_progress["exif_done"] = (

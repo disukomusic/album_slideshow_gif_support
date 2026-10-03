@@ -1584,9 +1584,12 @@ class AlbumSlideshowCamera(Camera):
     async def _http_get(self, url: str) -> bytes | None:
         """Fetch one remote image with validation and a hard timeout."""
         session = async_get_clientsession(self.hass)
+        verify_ssl = getattr(self.coordinator, "image_request_verify_ssl", True)
         try:
             async with async_timeout.timeout(30):
-                async with session.get(url, headers=self._image_request_headers(url)) as resp:
+                async with session.get(
+                    url, headers=self._image_request_headers(url), ssl=verify_ssl
+                ) as resp:
                     resp.raise_for_status()
 
                     content_type = resp.headers.get("Content-Type", "")

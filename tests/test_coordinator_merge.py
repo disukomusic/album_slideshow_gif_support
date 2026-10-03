@@ -581,6 +581,7 @@ def test_enriching_providers_matches_documented_set():
         PROVIDER_LOCAL_FOLDER,
         PROVIDER_MEDIA_SOURCE,
         PROVIDER_NEXTCLOUD,
+        PROVIDER_UGREEN,
     )
 
     assert set(ENRICHING_PROVIDERS) == {
@@ -588,6 +589,7 @@ def test_enriching_providers_matches_documented_set():
         PROVIDER_IMMICH,
         PROVIDER_NEXTCLOUD,
         PROVIDER_ENTE,
+        PROVIDER_UGREEN,
     }
     # Providers with no metadata to enrich must stay out, or they'd get a
     # progress sensor that never moves.

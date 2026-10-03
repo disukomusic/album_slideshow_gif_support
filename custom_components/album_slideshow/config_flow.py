@@ -99,6 +99,10 @@ from .const import (
     DEFAULT_ENTE_IMAGE_SIZE,
     ENTE_IMAGE_FULL,
     ENTE_IMAGE_PREVIEW,
+    CONF_UGREEN_URL,
+    CONF_UGREEN_USERNAME,
+    CONF_UGREEN_PASSWORD,
+    CONF_UGREEN_ALBUM_NAME,
     DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
@@ -109,6 +113,7 @@ from .const import (
     PROVIDER_SYNOLOGY,
     PROVIDER_NEXTCLOUD,
     PROVIDER_ENTE,
+    PROVIDER_UGREEN,
     DEFAULT_RECURSIVE,
 )
 
@@ -374,6 +379,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._syn_places: dict[str, str] = {}
         self._syn_tags: dict[str, str] = {}
         self._syn_subjects: dict[str, str] = {}
+        # UGREEN flow state carried between steps.
+        self._ugr_url: str | None = None
+        self._ugr_username: str | None = None
+        self._ugr_password: str | None = None
+        self._ugr_albums: list[dict[str, Any]] = []
 
     @staticmethod
     @callback
@@ -424,6 +434,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_nextcloud()
             if self._provider == PROVIDER_ENTE:
                 return await self.async_step_ente()
+            if self._provider == PROVIDER_UGREEN:
+                return await self.async_step_ugreen()
             return await self.async_step_google_shared()
 
         schema = vol.Schema(
@@ -437,6 +449,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     PROVIDER_SYNOLOGY: "Synology Photos (direct API, full metadata)",
                     PROVIDER_NEXTCLOUD: "Nextcloud (WebDAV folder or public album link)",
                     PROVIDER_ENTE: "Ente Photos (public album link)",
+                    PROVIDER_UGREEN: "UGREEN NAS (UGOS Photos, experimental)",
                     PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
                 })
             }
@@ -1115,6 +1128,109 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="synology_select", data_schema=vol.Schema(fields), errors=errors
         )
+
+    async def async_step_ugreen(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the UGREEN NAS URL + account and log in.
+
+        The album is picked from a live dropdown in the next step rather
+        than typed in, so logging in here (and listing albums) doubles as
+        credential validation.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_UGREEN_URL].strip()
+            username = user_input[CONF_UGREEN_USERNAME].strip()
+            password = user_input.get(CONF_UGREEN_PASSWORD) or ""
+
+            from . import ugreen as ugr_api
+
+            client = ugr_api.UGreenClient(self.hass, url, username, password)
+            albums: list[dict[str, Any]] = []
+            try:
+                await client.async_login()
+                albums = await client.async_list_albums()
+            except ugr_api.UGreenAuthError as err:
+                _LOGGER.warning(
+                    "UGREEN login failed for %s: %s", url, _describe_error(err)
+                )
+                errors["base"] = "ugreen_cannot_connect"
+            except ugr_api.UGreenApiError as err:
+                _LOGGER.warning(
+                    "UGREEN album listing failed for %s: %s", url, _describe_error(err)
+                )
+                errors["base"] = "ugreen_cannot_connect"
+
+            named_albums = [
+                a for a in albums if isinstance(a, dict) and a.get("album_name")
+            ]
+            if not errors and not named_albums:
+                errors["base"] = "ugreen_no_albums"
+
+            if not errors:
+                self._ugr_url = client.base_url
+                self._ugr_username = username
+                self._ugr_password = password
+                self._ugr_albums = named_albums
+                return await self.async_step_ugreen_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_UGREEN_URL): str,
+                vol.Required(CONF_UGREEN_USERNAME): str,
+                vol.Required(CONF_UGREEN_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+            }
+        )
+        return self.async_show_form(step_id="ugreen", data_schema=schema, errors=errors)
+
+    async def async_step_ugreen_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick the UGOS Photos album from a live dropdown."""
+        # Keyed by uuid (not name) since album names aren't guaranteed unique;
+        # the submitted uuid is resolved back to its name below for storage.
+        albums_by_uuid = {
+            a["album_uuid"]: a for a in self._ugr_albums if a.get("album_uuid")
+        }
+
+        if user_input is not None:
+            album = albums_by_uuid.get(user_input[CONF_UGREEN_ALBUM_NAME])
+            album_name = album["album_name"] if album else user_input[CONF_UGREEN_ALBUM_NAME]
+            unique = (
+                f"{DOMAIN}:{PROVIDER_UGREEN}:{self._ugr_url}:"
+                f"{self._ugr_username}:{album_name}"
+            )
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
+            data = {
+                CONF_PROVIDER: PROVIDER_UGREEN,
+                CONF_UGREEN_URL: self._ugr_url,
+                CONF_UGREEN_USERNAME: self._ugr_username,
+                CONF_UGREEN_PASSWORD: self._ugr_password,
+                CONF_UGREEN_ALBUM_NAME: album_name,
+            }
+            return self.async_create_entry(title=album_name, data=data)
+
+        # Same-named albums are only distinguished by their type, so show it
+        # as a suffix when a name appears more than once.
+        name_counts: dict[str, int] = {}
+        for a in self._ugr_albums:
+            name_counts[a["album_name"]] = name_counts.get(a["album_name"], 0) + 1
+        options = {
+            a["album_uuid"]: (
+                f"{a['album_name']} (Album type {a.get('album_type')})"
+                if name_counts[a["album_name"]] > 1
+                else a["album_name"]
+            )
+            for a in self._ugr_albums
+        }
+
+        schema = vol.Schema({vol.Required(CONF_UGREEN_ALBUM_NAME): vol.In(options)})
+        return self.async_show_form(step_id="ugreen_select", data_schema=schema)
 
     async def async_step_nextcloud(
         self, user_input: dict[str, Any] | None = None

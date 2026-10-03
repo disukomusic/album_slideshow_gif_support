@@ -75,6 +75,7 @@ PROVIDER_ICLOUD = "icloud"
 PROVIDER_SYNOLOGY = "synology"
 PROVIDER_NEXTCLOUD = "nextcloud"
 PROVIDER_ENTE = "ente"
+PROVIDER_UGREEN = "ugreen"
 
 # Providers whose coordinator runs a background enrichment pass: per-photo
 # metadata reads, reverse-geocoding, or both. These are the entries that get
@@ -85,6 +86,7 @@ ENRICHING_PROVIDERS = (
     PROVIDER_IMMICH,
     PROVIDER_NEXTCLOUD,
     PROVIDER_ENTE,
+    PROVIDER_UGREEN,
 )
 
 # Nextcloud provider - two auth modes against the same PROVIDER_NEXTCLOUD id:
@@ -237,6 +239,22 @@ DEFAULT_PHOTOPRISM_IMAGE_SIZE = PHOTOPRISM_IMAGE_PREVIEW
 # queried separately and merged. Selection id is a JSON object
 # ``{"albums": [...], "people": [...], "favorites": bool}``; empty means all.
 PHOTOPRISM_SELECTION_COMPOSITE = "composite"
+
+
+# UGREEN NAS (UGOS Photos) provider. Talks to the undocumented UGOS Photos
+# web API (see ``ugreen.py``); login is username + password, with the
+# password RSA-encrypted before it ever leaves HA, same as the UGOS web app.
+# UGOS NAS web interfaces are normally self-signed HTTPS, so this provider
+# does not verify the TLS certificate.
+CONF_UGREEN_URL = "ugreen_url"
+CONF_UGREEN_USERNAME = "ugreen_username"
+CONF_UGREEN_PASSWORD = "ugreen_password"
+# The album is identified by its human-readable name rather than its
+# ``album_uuid``/``album_type`` - both are looked up from ``album/list`` by
+# matching this name on every refresh, so editing this value (or an album
+# being recreated with the same name) does not require reconfiguring the
+# integration.
+CONF_UGREEN_ALBUM_NAME = "ugreen_album_name"
 
 
 FILL_COVER = "cover"
