@@ -29,6 +29,7 @@ Login flow (mirrors the web app's own login):
 Re-authenticating on every coordinator refresh (like ``synology.py`` does)
 rather than trying to persist/renew a session keeps this resilient to that.
 """
+
 from __future__ import annotations
 
 import base64
@@ -56,8 +57,22 @@ _ALBUM_PICTURE_LIST_PATH = "/ugreen/v5/photo/album/picture/list"
 _PICTURE_STREAM_PATH = "/ugreen/v5/photo/picture/stream"
 _PICTURE_INFO_PATH = "/ugreen/v5/photo/picture/info"
 
-# ``album_type`` values from ``album/list``; only 1 has been verified.
+# ``album_type`` values from ``album/list``.
 ALBUM_TYPE_REGULAR = 1
+ALBUM_TYPE_CONDITIONAL = 2  # a saved search/filter (date range, media type, location, ...)
+ALBUM_TYPE_BABY = 3
+
+_ALBUM_TYPE_LABELS = {
+    ALBUM_TYPE_REGULAR: "Regular",
+    ALBUM_TYPE_CONDITIONAL: "Conditional",
+    ALBUM_TYPE_BABY: "Baby",
+}
+
+
+def describe_album_type(album_type: Any) -> str:
+    """Human-readable label for an ``album_type`` value, for display only."""
+    return _ALBUM_TYPE_LABELS.get(album_type, f"Type {album_type}")
+
 
 # ``size_type`` for ``picture/stream``; 3 is what the web app's album grid uses.
 STREAM_SIZE_THUMBNAIL = 3
@@ -233,9 +248,7 @@ class UGreenClient:
         """Session cookie for image bytes (no token/security-key needed there)."""
         if not self._plain_token:
             return {}
-        return {
-            "Cookie": f"token_uid={self._uid}; token={self._auth_token_header()}"
-        }
+        return {"Cookie": f"token_uid={self._uid}; token={self._auth_token_header()}"}
 
     def _session(self):
         return async_get_clientsession(self.hass)
@@ -263,11 +276,14 @@ class UGreenClient:
         """
         session = self._session()
         try:
-            async with async_timeout.timeout(_TIMEOUT), session.post(
-                f"{self.base_url}{_CHECK_PATH}",
-                json={"username": self.username},
-                ssl=False,
-            ) as resp:
+            async with (
+                async_timeout.timeout(_TIMEOUT),
+                session.post(
+                    f"{self.base_url}{_CHECK_PATH}",
+                    json={"username": self.username},
+                    ssl=False,
+                ) as resp,
+            ):
                 rsa_token_b64 = resp.headers.get("x-rsa-token")
                 await resp.read()
         except Exception as err:
@@ -281,17 +297,20 @@ class UGreenClient:
         encrypted_password = _rsa_encrypt_long(self.password, check_public_key)
 
         try:
-            async with async_timeout.timeout(_TIMEOUT), session.post(
-                f"{self.base_url}{_LOGIN_PATH}",
-                json={
-                    "username": self.username,
-                    "password": encrypted_password,
-                    "keepalive": True,
-                    "otp": True,
-                    "is_simple": True,
-                },
-                ssl=False,
-            ) as resp:
+            async with (
+                async_timeout.timeout(_TIMEOUT),
+                session.post(
+                    f"{self.base_url}{_LOGIN_PATH}",
+                    json={
+                        "username": self.username,
+                        "password": encrypted_password,
+                        "keepalive": True,
+                        "otp": True,
+                        "is_simple": True,
+                    },
+                    ssl=False,
+                ) as resp,
+            ):
                 data = await resp.json(content_type=None)
         except Exception as err:
             raise UGreenAuthError(f"UGREEN login request failed: {err}") from err
@@ -314,13 +333,16 @@ class UGreenClient:
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         session = self._session()
-        async with async_timeout.timeout(_TIMEOUT), session.post(
-            f"{self.base_url}{path}",
-            json=body,
-            headers=self._auth_headers(),
-            cookies=self._auth_cookies(),
-            ssl=False,
-        ) as resp:
+        async with (
+            async_timeout.timeout(_TIMEOUT),
+            session.post(
+                f"{self.base_url}{path}",
+                json=body,
+                headers=self._auth_headers(),
+                cookies=self._auth_cookies(),
+                ssl=False,
+            ) as resp,
+        ):
             return await resp.json(content_type=None)
 
     @staticmethod
@@ -398,12 +420,15 @@ class UGreenClient:
             "source_album_uuid": source_album_uuid,
             "source_album_type": source_album_type,
         }
-        async with async_timeout.timeout(_TIMEOUT), session.get(
-            f"{self.base_url}{_PICTURE_INFO_PATH}",
-            params=params,
-            headers=self._auth_headers(),
-            cookies=self._auth_cookies(),
-            ssl=False,
-        ) as resp:
+        async with (
+            async_timeout.timeout(_TIMEOUT),
+            session.get(
+                f"{self.base_url}{_PICTURE_INFO_PATH}",
+                params=params,
+                headers=self._auth_headers(),
+                cookies=self._auth_cookies(),
+                ssl=False,
+            ) as resp,
+        ):
             data = await resp.json(content_type=None)
         return self._unwrap(data, "picture/info")

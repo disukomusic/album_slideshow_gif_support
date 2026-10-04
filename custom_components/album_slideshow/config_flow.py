@@ -1190,7 +1190,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ugreen_select(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Pick the UGOS Photos album from a live dropdown."""
+        """Pick the UGOS Photos album from a live, searchable dropdown."""
+        from . import ugreen as ugr_api
+
         # Keyed by uuid (not name) since album names aren't guaranteed unique;
         # the submitted uuid is resolved back to its name below for storage.
         albums_by_uuid = {
@@ -1215,21 +1217,26 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
             return self.async_create_entry(title=album_name, data=data)
 
-        # Same-named albums are only distinguished by their type, so show it
-        # as a suffix when a name appears more than once.
-        name_counts: dict[str, int] = {}
-        for a in self._ugr_albums:
-            name_counts[a["album_name"]] = name_counts.get(a["album_name"], 0) + 1
-        options = {
-            a["album_uuid"]: (
-                f"{a['album_name']} (Album type {a.get('album_type')})"
-                if name_counts[a["album_name"]] > 1
-                else a["album_name"]
+        # A searchable dropdown (rather than a plain vol.In) keeps this
+        # usable for accounts with a large number of albums.
+        options = [
+            selector.SelectOptionDict(
+                value=a["album_uuid"],
+                label=f"{a['album_name']} ({ugr_api.describe_album_type(a.get('album_type'))})",
             )
             for a in self._ugr_albums
-        }
-
-        schema = vol.Schema({vol.Required(CONF_UGREEN_ALBUM_NAME): vol.In(options)})
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_UGREEN_ALBUM_NAME): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                        custom_value=False,
+                    )
+                )
+            }
+        )
         return self.async_show_form(step_id="ugreen_select", data_schema=schema)
 
     async def async_step_nextcloud(

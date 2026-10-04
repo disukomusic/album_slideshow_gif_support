@@ -112,6 +112,18 @@ def test_find_album_by_name_ignores_non_dict_entries():
     assert ugr.find_album_by_name([None, "oops", SAMPLE_ALBUM], "Vacation Photos") == SAMPLE_ALBUM
 
 
+# ── describe_album_type ──────────────────────────────────────────────────── 
+
+def test_describe_album_type_known_values():
+    assert ugr.describe_album_type(ugr.ALBUM_TYPE_REGULAR) == "Regular"
+    assert ugr.describe_album_type(ugr.ALBUM_TYPE_CONDITIONAL) == "Conditional"
+    assert ugr.describe_album_type(ugr.ALBUM_TYPE_BABY) == "Baby"
+
+
+def test_describe_album_type_unknown_value_falls_back():
+    assert ugr.describe_album_type(99) == "Type 99"
+
+
 # ── parse_photo_meta ───────────────────────────────────────────────────────
 
 def test_parse_photo_meta_full():
