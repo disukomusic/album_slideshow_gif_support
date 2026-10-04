@@ -85,7 +85,7 @@ def test_rsa_encrypt_long_empty_string():
     assert len(encrypted) == 344
 
 
-# ── build_image_url ──────────────────────────────────────────────────────── 
+# ── build_image_url ────────────────────────────────────────────────────────
 
 def test_build_image_url_includes_required_params():
     url = ugr.build_image_url(
@@ -113,7 +113,7 @@ def test_find_album_by_name_ignores_non_dict_entries():
     assert ugr.find_album_by_name([None, "oops", SAMPLE_ALBUM], "Vacation Photos") == SAMPLE_ALBUM
 
 
-# ── parse_photo_meta ─────────────────────────────────────────────────────── 
+# ── parse_photo_meta ───────────────────────────────────────────────────────
 
 def test_parse_photo_meta_full():
     meta = ugr.parse_photo_meta(SAMPLE_PICTURE)
@@ -124,7 +124,7 @@ def test_parse_photo_meta_full():
 
 
 def test_parse_photo_meta_missing_fields():
-    assert ugr.parse_photo_meta({}) == {}
+    assert not ugr.parse_photo_meta({})
 
 
 # ── _float_or_none / location_label / parse_picture_location ───────────────
@@ -196,7 +196,7 @@ def test_parse_picture_location_with_gps():
 
 
 def test_parse_picture_location_without_gps_returns_empty():
-    assert ugr.parse_picture_location(SAMPLE_PICTURE_INFO_NO_GPS) == {}
+    assert not ugr.parse_picture_location(SAMPLE_PICTURE_INFO_NO_GPS)
 
 
 def test_parse_picture_location_skips_null_island():

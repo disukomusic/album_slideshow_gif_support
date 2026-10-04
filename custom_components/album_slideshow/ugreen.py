@@ -230,7 +230,7 @@ class UGreenClient:
 
     @property
     def image_headers(self) -> dict[str, str]:
-        """Session cookie for fetching image bytes server-side (no token/security-key needed there)."""
+        """Session cookie for image bytes (no token/security-key needed there)."""
         if not self._plain_token:
             return {}
         return {
