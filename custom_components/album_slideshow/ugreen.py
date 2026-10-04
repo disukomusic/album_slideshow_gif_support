@@ -263,14 +263,13 @@ class UGreenClient:
         """
         session = self._session()
         try:
-            async with async_timeout.timeout(_TIMEOUT):
-                async with session.post(
-                    f"{self.base_url}{_CHECK_PATH}",
-                    json={"username": self.username},
-                    ssl=False,
-                ) as resp:
-                    rsa_token_b64 = resp.headers.get("x-rsa-token")
-                    await resp.read()
+            async with async_timeout.timeout(_TIMEOUT), session.post(
+                f"{self.base_url}{_CHECK_PATH}",
+                json={"username": self.username},
+                ssl=False,
+            ) as resp:
+                rsa_token_b64 = resp.headers.get("x-rsa-token")
+                await resp.read()
         except Exception as err:
             raise UGreenAuthError(f"Could not reach UGREEN NAS: {err}") from err
         if not rsa_token_b64:
@@ -282,19 +281,18 @@ class UGreenClient:
         encrypted_password = _rsa_encrypt_long(self.password, check_public_key)
 
         try:
-            async with async_timeout.timeout(_TIMEOUT):
-                async with session.post(
-                    f"{self.base_url}{_LOGIN_PATH}",
-                    json={
-                        "username": self.username,
-                        "password": encrypted_password,
-                        "keepalive": True,
-                        "otp": True,
-                        "is_simple": True,
-                    },
-                    ssl=False,
-                ) as resp:
-                    data = await resp.json(content_type=None)
+            async with async_timeout.timeout(_TIMEOUT), session.post(
+                f"{self.base_url}{_LOGIN_PATH}",
+                json={
+                    "username": self.username,
+                    "password": encrypted_password,
+                    "keepalive": True,
+                    "otp": True,
+                    "is_simple": True,
+                },
+                ssl=False,
+            ) as resp:
+                data = await resp.json(content_type=None)
         except Exception as err:
             raise UGreenAuthError(f"UGREEN login request failed: {err}") from err
 
@@ -316,15 +314,14 @@ class UGreenClient:
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         session = self._session()
-        async with async_timeout.timeout(_TIMEOUT):
-            async with session.post(
-                f"{self.base_url}{path}",
-                json=body,
-                headers=self._auth_headers(),
-                cookies=self._auth_cookies(),
-                ssl=False,
-            ) as resp:
-                return await resp.json(content_type=None)
+        async with async_timeout.timeout(_TIMEOUT), session.post(
+            f"{self.base_url}{path}",
+            json=body,
+            headers=self._auth_headers(),
+            cookies=self._auth_cookies(),
+            ssl=False,
+        ) as resp:
+            return await resp.json(content_type=None)
 
     @staticmethod
     def _unwrap(data: Any, action: str) -> dict[str, Any]:
@@ -401,13 +398,12 @@ class UGreenClient:
             "source_album_uuid": source_album_uuid,
             "source_album_type": source_album_type,
         }
-        async with async_timeout.timeout(_TIMEOUT):
-            async with session.get(
-                f"{self.base_url}{_PICTURE_INFO_PATH}",
-                params=params,
-                headers=self._auth_headers(),
-                cookies=self._auth_cookies(),
-                ssl=False,
-            ) as resp:
-                data = await resp.json(content_type=None)
+        async with async_timeout.timeout(_TIMEOUT), session.get(
+            f"{self.base_url}{_PICTURE_INFO_PATH}",
+            params=params,
+            headers=self._auth_headers(),
+            cookies=self._auth_cookies(),
+            ssl=False,
+        ) as resp:
+            data = await resp.json(content_type=None)
         return self._unwrap(data, "picture/info")

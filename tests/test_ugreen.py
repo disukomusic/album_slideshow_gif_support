@@ -8,7 +8,6 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from custom_components.album_slideshow import ugreen as ugr
 
-
 # A realistic item, shaped like a live ``album/picture/list`` response entry.
 SAMPLE_PICTURE = {
     "picture_id": 2,
