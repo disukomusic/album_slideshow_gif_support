@@ -646,6 +646,12 @@ NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
 - The password is RSA-encrypted before it ever leaves Home Assistant, the
   same way the UGOS web app encrypts it. A fresh session is established on
   every refresh rather than persisting one.
+- **Two-factor authentication is not yet supported.** Use an account without
+  2FA enabled for now; support for it is planned.
 - UGOS NAS web interfaces are normally reached over a self-signed HTTPS
   certificate, so this provider does not verify the TLS certificate.
 - New photos added to the album show up on the next refresh.
+
+> **Use a dedicated account.** Create a separate UGOS account for Home
+> Assistant and either create the album with that account or share an
+> existing album with it, rather than using your own admin/personal login.
