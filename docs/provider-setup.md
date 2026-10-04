@@ -634,10 +634,15 @@ NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
 1. Add the integration and choose **UGREEN NAS (UGOS Photos, experimental)**.
 2. Enter your NAS address including port (e.g. `https://192.168.1.10:9443`)
    and an account username and password.
-3. Pick the album to show from the live dropdown.
+3. Pick the album to show from the live, searchable dropdown; each entry
+   shows its album type (see below) to help tell same-named albums apart.
 
 ### Notes
 
+- **Album types.** UGOS Photos has three kinds of albums: **Regular** (a
+  normal album), **Conditional** (a saved search/filter, e.g. by date range,
+  media type, or location), and **Baby** (its baby-photos album). All three
+  can be selected.
 - **Date works; location depends on your library.** Capture date comes back
   with every photo. GPS coordinates are fetched per photo in the background
   after the first refresh, so the location attribute and caption may take a
