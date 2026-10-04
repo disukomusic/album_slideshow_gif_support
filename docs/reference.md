@@ -146,7 +146,7 @@ along with the [runtime controls](#runtime-configuration) above.
 | Media count | All | Number of images currently available |
 | Hidden photos | All | Number of persisted exclusions for this slideshow |
 | Image cache usage *(diagnostic)* | All | Current download cache size in MB |
-| Enrichment progress *(diagnostic)* | Local folder / Immich / Nextcloud / Ente / opted-in Google enrichment | Percent of items whose enabled metadata work has been processed. Google reuses this diagnostic sensor for camera metadata and optional GPS scans. Attributes include `phase`, `exif_done`/`exif_total`, `geocode_done`/`geocode_total`. |
+| Enrichment progress *(diagnostic)* | Local folder / Immich / Nextcloud / Ente / UGREEN / opted-in Google enrichment | Percent of items whose enabled metadata work has been processed. Google reuses this diagnostic sensor for camera metadata and optional GPS scans; UGREEN uses it for per-photo GPS lookups. Attributes include `phase`, `exif_done`/`exif_total`, `geocode_done`/`geocode_total`. |
 
 ## Camera Attributes
 

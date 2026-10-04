@@ -15,6 +15,7 @@ images, not videos. Install the integration first using the
 | [PhotoPrism](#photoprism) | A PhotoPrism server (album, person, favorites, all, search) | Yes | Yes | Yes |
 | [iCloud](#icloud-shared-album) | An iCloud Shared Album public link | Yes | No | Yes |
 | [Synology](#synology-photos) | A Synology Photos library (favorites, albums, people, places, tags, subjects) | Yes | Yes | Yes |
+| [UGREEN](#ugreen-nas-ugos-photos) | A UGREEN NAS running UGOS Photos (experimental) | Yes | Yes | No |
 | [Nextcloud (folder)](#authenticated-webdav-folder) | Any folder in your Nextcloud files (WebDAV, app password) | Yes | Yes | Yes |
 | [Nextcloud (public link)](#public-album-link) | A public Nextcloud Photos album share link (no login) | Yes | Yes | Yes |
 | [Ente Photos](#ente-photos) | A public Ente album link (no login, end-to-end encrypted) | Yes | Yes | Yes |
@@ -621,3 +622,30 @@ If your photos are local files (for example a NAS folder mounted under `/media`)
 use the **Local Folder** provider instead of Media Source to get full EXIF-based
 dates, location, and description captions. Google Photos also lacks location
 and descriptions, but does provide dates as shown in the provider table.
+
+## UGREEN NAS (UGOS Photos)
+
+> **Experimental.** This provider talks to the undocumented UGOS Photos web
+> API. UGREEN could change it at any time without notice.
+
+The **UGREEN** provider connects straight to the **Photos** app on a UGREEN
+NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
+
+1. Add the integration and choose **UGREEN NAS (UGOS Photos, experimental)**.
+2. Enter your NAS address including port (e.g. `https://192.168.1.10:9443`)
+   and an account username and password.
+3. Pick the album to show from the live dropdown.
+
+### Notes
+
+- **Date works; location depends on your library.** Capture date comes back
+  with every photo. GPS coordinates are fetched per photo in the background
+  after the first refresh, so the location attribute and caption may take a
+  moment to appear, and stay empty for photos with no GPS data in UGOS
+  Photos. There is no description/caption field in this API.
+- The password is RSA-encrypted before it ever leaves Home Assistant, the
+  same way the UGOS web app encrypts it. A fresh session is established on
+  every refresh rather than persisting one.
+- UGOS NAS web interfaces are normally reached over a self-signed HTTPS
+  certificate, so this provider does not verify the TLS certificate.
+- New photos added to the album show up on the next refresh.

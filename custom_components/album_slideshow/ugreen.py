@@ -1,8 +1,9 @@
 """UGREEN NAS (UGOS Photos) client and pure parsing helpers.
 
-Talks to the UGOS Photos web app's undocumented API, reverse-engineered for
-https://github.com/eyalgal/album_slideshow/issues/44. There is no official
-UGREEN documentation for any of this, and it could change without notice.
+Talks to the UGOS Photos web app's undocumented API, reverse-engineered by
+capturing and replaying its own browser network traffic. There is no
+official UGREEN documentation for any of this, and it could change without
+notice.
 
 Login flow (mirrors the web app's own login):
 
