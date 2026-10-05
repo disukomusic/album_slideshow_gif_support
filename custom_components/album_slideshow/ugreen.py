@@ -383,7 +383,7 @@ class UGreenClient:
                 "offset": offset,
                 "sort_by": 0,
                 "sort_order": 0,
-                "type_option": {"all": 0, "image": 1, "video": 0, "gif": 0, "live": 0},
+                "type_option": {"all": 0, "image": 1, "video": 0, "gif": 1, "live": 1},
                 "provider_option": {
                     "provider_mine": 1,
                     "provider_other": 1,
