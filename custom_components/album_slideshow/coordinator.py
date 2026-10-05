@@ -2071,6 +2071,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
             picture_id = p.get("picture_id")
             if picture_id is None:
                 continue
+            # The listing includes videos, which would only show a poster frame.
+            ext = p.get("real_ext_name") or Path(str(p.get("file_name") or "")).suffix
+            if f".{str(ext).lstrip('.').lower()}" in _VIDEO_EXTS:
+                continue
             meta = ugr_api.parse_photo_meta(p)
             items.append(
                 MediaItem(
