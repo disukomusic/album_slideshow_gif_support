@@ -271,6 +271,16 @@ def test_async_list_albums_stops_when_offset_is_ignored():
     assert len(calls) == 2
 
 
+def test_async_get_album_name_matches_by_uuid():
+    renamed = dict(SAMPLE_ALBUM, album_name="Renamed")
+    c, _ = _client_with_responses([
+        {"code": 200, "data": {"result": [renamed]}},
+        {"code": 200, "data": {"result": [renamed]}},
+    ])
+    assert asyncio.run(c.async_get_album_name(SAMPLE_ALBUM["album_uuid"])) == "Renamed"
+    assert asyncio.run(c.async_get_album_name("some-other-uuid")) is None
+
+
 def test_async_list_albums_raises_on_error_code():
     c, _ = _client_with_responses([{"code": 1024, "msg": "Login has expired"}])
     try:
@@ -393,6 +403,8 @@ def test_async_get_picture_info_raises_on_error_code():
 class _FakeUGreenClient:
     """Stands in for a logged-in client; every login gets its own ``ugk``."""
 
+    album_name = "Renamed in UGOS"
+
     def __init__(self, hass, url, username, password, *, verify_ssl=True):
         self.base_url = ugr.normalize_base_url(url)
         self.verify_ssl = verify_ssl
@@ -410,6 +422,11 @@ class _FakeUGreenClient:
             dict(SAMPLE_PICTURE, picture_id=3, file_name="clip.MOV", real_ext_name="mov"),
             dict(SAMPLE_PICTURE, picture_id=4, file_name="IMG_0004.mp4", real_ext_name=""),
         ]
+
+    async def async_get_album_name(self, album_uuid):
+        if isinstance(self.album_name, Exception):
+            raise self.album_name
+        return self.album_name
 
 
 def _ugreen_coordinator(monkeypatch, **data):
@@ -429,8 +446,10 @@ def _ugreen_coordinator(monkeypatch, **data):
 
 def test_update_ugreen_builds_token_free_photo_items(monkeypatch):
     coord = _ugreen_coordinator(monkeypatch, **{CONF_UGREEN_VERIFY_SSL: False})
-    items = asyncio.run(coord._update_ugreen())["items"]
+    data = asyncio.run(coord._update_ugreen())
+    items = data["items"]
 
+    assert data["title"] == "Renamed in UGOS"
     assert [item.source_id for item in items] == ["2"]
     assert "ugk" not in items[0].url
     assert "source_album_uuid=uuid-1" in items[0].url
@@ -455,3 +474,9 @@ def test_update_ugreen_urls_survive_a_new_login(monkeypatch):
     assert second[0].url == first[0].url
     assert second[0].exif_scanned and second[0].latitude == 52.52
     assert coord.image_request_verify_ssl is True
+
+
+def test_update_ugreen_title_falls_back_to_entry_title(monkeypatch):
+    coord = _ugreen_coordinator(monkeypatch)
+    monkeypatch.setattr(_FakeUGreenClient, "album_name", ugr.UGreenApiError("album/list failed"))
+    assert asyncio.run(coord._update_ugreen())["title"] == "Vacation Photos"

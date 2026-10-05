@@ -2064,7 +2064,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             picture_id = p.get("picture_id")
             if picture_id is None:
                 continue
-            # The listing includes videos, which would only show a poster frame.
+            # Backstop for type_option; a video would only show its poster frame.
             ext = p.get("real_ext_name") or Path(str(p.get("file_name") or "")).suffix
             if f".{str(ext).lstrip('.').lower()}" in _VIDEO_EXTS:
                 continue
@@ -2098,8 +2098,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
         if not items:
             raise UpdateFailed("Could not resolve any UGREEN images")
 
+        try:
+            album_name = await client.async_get_album_name(album_uuid)
+        except Exception as err:  # noqa: BLE001 - the title is cosmetic
+            _LOGGER.debug("UGREEN: could not read the album name: %s", err)
+            album_name = None
+
         return {
-            "title": self.entry.title,
+            "title": album_name or self.entry.title,
             "items": items,
         }
 

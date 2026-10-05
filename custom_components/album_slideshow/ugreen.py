@@ -369,6 +369,13 @@ class UGreenClient:
                 return list(albums.values())
             offset += _ALBUM_PAGE_SIZE
 
+    async def async_get_album_name(self, album_uuid: str) -> str | None:
+        """Current name of an album, or ``None`` if ``album/list`` lacks it."""
+        for album in await self.async_list_albums():
+            if album["album_uuid"] == album_uuid:
+                return album.get("album_name") or None
+        return None
+
     async def async_list_album_pictures(
         self, album_uuid: str, album_type: int = ALBUM_TYPE_REGULAR
     ) -> list[dict[str, Any]]:

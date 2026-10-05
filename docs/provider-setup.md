@@ -637,7 +637,8 @@ NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
    unless the NAS uses a self-signed certificate (see the notes below).
 3. Pick the album to show from the live, searchable dropdown; each entry
    shows its album type (see below) to help tell same-named albums apart.
-   The slideshow follows the album by its ID, so renaming it later is fine.
+   The slideshow follows the album by its ID, so renaming it later is fine;
+   the **Album title** sensor picks up the new name on the next refresh.
 
 ### Notes
 
