@@ -44,6 +44,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _TIMEOUT = 30
 _PAGE_SIZE = 1000
+_ALBUM_PAGE_SIZE = 100
 _MAX_ASSETS = 20_000
 
 # The web app always splits into 117-character chunks before RSA-encrypting,
@@ -131,20 +132,6 @@ def build_image_url(
         "upload_time": upload_time,
     }
     return f"{normalize_base_url(base_url)}{_PICTURE_STREAM_PATH}?{urlencode(params)}"
-
-
-def find_album_by_name(
-    albums: list[dict[str, Any]], name: str
-) -> dict[str, Any] | None:
-    """Return the ``album/list`` entry whose ``album_name`` matches ``name``.
-
-    Album names are not guaranteed unique on the NAS; the first match wins,
-    same as every other name-based lookup in this integration.
-    """
-    for album in albums:
-        if isinstance(album, dict) and album.get("album_name") == name:
-            return album
-    return None
 
 
 def parse_photo_meta(item: dict[str, Any]) -> dict[str, Any]:
@@ -356,18 +343,29 @@ class UGreenClient:
 
     async def async_list_albums(self) -> list[dict[str, Any]]:
         """Return every regular, synced and shared album for this account."""
-        body = {
-            "sort_by": 4,
-            "sort_order": 0,
-            "album_select": 1,
-            "share_select": [1, 2],
-            "album_type": [1, 2, 3],
-            "limit": 100,
-            "offset": 0,
-            "get_show_type": 1,
-        }
-        data = self._unwrap(await self._post(_ALBUM_LIST_PATH, body), "album/list")
-        return data.get("result") or []
+        albums: dict[str, dict[str, Any]] = {}
+        offset = 0
+        while True:
+            body = {
+                "sort_by": 4,
+                "sort_order": 0,
+                "album_select": 1,
+                "share_select": [1, 2],
+                "album_type": [1, 2, 3],
+                "limit": _ALBUM_PAGE_SIZE,
+                "offset": offset,
+                "get_show_type": 1,
+            }
+            data = self._unwrap(await self._post(_ALBUM_LIST_PATH, body), "album/list")
+            batch = data.get("result") or []
+            before = len(albums)
+            for album in batch:
+                if isinstance(album, dict) and album.get("album_uuid"):
+                    albums.setdefault(album["album_uuid"], album)
+            # A page with nothing new also stops, in case offset is ignored.
+            if len(batch) < _ALBUM_PAGE_SIZE or len(albums) == before:
+                return list(albums.values())
+            offset += _ALBUM_PAGE_SIZE
 
     async def async_list_album_pictures(
         self, album_uuid: str, album_type: int = ALBUM_TYPE_REGULAR

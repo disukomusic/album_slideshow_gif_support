@@ -103,20 +103,6 @@ def test_image_params_carry_static_token_only_after_login():
     assert c.image_params == {"ugk": "STATICTOKEN"}
 
 
-# ── find_album_by_name ──────────────────────────────────────────────────────
-
-def test_find_album_by_name_matches():
-    assert ugr.find_album_by_name([SAMPLE_ALBUM], "Vacation Photos") == SAMPLE_ALBUM
-
-
-def test_find_album_by_name_no_match_returns_none():
-    assert ugr.find_album_by_name([SAMPLE_ALBUM], "Does not exist") is None
-
-
-def test_find_album_by_name_ignores_non_dict_entries():
-    assert ugr.find_album_by_name([None, "oops", SAMPLE_ALBUM], "Vacation Photos") == SAMPLE_ALBUM
-
-
 # ── describe_album_type ────────────────────────────────────────────────────
 
 def test_describe_album_type_known_values():
@@ -250,6 +236,29 @@ def test_async_list_albums_returns_result_list():
     albums = asyncio.run(c.async_list_albums())
     assert albums == [SAMPLE_ALBUM]
     assert calls[0][0] == ugr._ALBUM_LIST_PATH
+
+
+def test_async_list_albums_pages_past_the_first_100():
+    def album(i):
+        return dict(SAMPLE_ALBUM, album_uuid=f"uuid-{i}", album_name=f"Album {i}")
+
+    c, calls = _client_with_responses([
+        {"code": 200, "data": {"result": [album(i) for i in range(100)]}},
+        {"code": 200, "data": {"result": [album(100), {"album_name": "no uuid"}]}},
+    ])
+    albums = asyncio.run(c.async_list_albums())
+    assert [a["album_uuid"] for a in albums] == [f"uuid-{i}" for i in range(101)]
+    assert [call[1]["offset"] for call in calls] == [0, 100]
+
+
+def test_async_list_albums_stops_when_offset_is_ignored():
+    page = [dict(SAMPLE_ALBUM, album_uuid=f"uuid-{i}") for i in range(100)]
+    c, calls = _client_with_responses([
+        {"code": 200, "data": {"result": page}},
+        {"code": 200, "data": {"result": page}},
+    ])
+    assert len(asyncio.run(c.async_list_albums())) == 100
+    assert len(calls) == 2
 
 
 def test_async_list_albums_raises_on_error_code():

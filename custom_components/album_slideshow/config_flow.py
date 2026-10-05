@@ -102,6 +102,8 @@ from .const import (
     CONF_UGREEN_URL,
     CONF_UGREEN_USERNAME,
     CONF_UGREEN_PASSWORD,
+    CONF_UGREEN_ALBUM_UUID,
+    CONF_UGREEN_ALBUM_TYPE,
     CONF_UGREEN_ALBUM_NAME,
     CONF_UGREEN_VERIFY_SSL,
     DEFAULT_REVERSE_GEOCODE,
@@ -1200,18 +1202,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Pick the UGOS Photos album from a live, searchable dropdown."""
         from . import ugreen as ugr_api
 
-        # Keyed by uuid (not name) since album names aren't guaranteed unique;
-        # the submitted uuid is resolved back to its name below for storage.
-        albums_by_uuid = {
-            a["album_uuid"]: a for a in self._ugr_albums if a.get("album_uuid")
-        }
+        # Keyed by uuid since album names aren't guaranteed unique.
+        albums_by_uuid = {a["album_uuid"]: a for a in self._ugr_albums}
 
         if user_input is not None:
-            album = albums_by_uuid.get(user_input[CONF_UGREEN_ALBUM_NAME])
-            album_name = album["album_name"] if album else user_input[CONF_UGREEN_ALBUM_NAME]
+            album_uuid = user_input[CONF_UGREEN_ALBUM_UUID]
+            album = albums_by_uuid[album_uuid]
             unique = (
                 f"{DOMAIN}:{PROVIDER_UGREEN}:{self._ugr_url}:"
-                f"{self._ugr_username}:{album_name}"
+                f"{self._ugr_username}:{album_uuid}"
             )
             await self.async_set_unique_id(unique)
             self._abort_if_unique_id_configured()
@@ -1221,9 +1220,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_UGREEN_USERNAME: self._ugr_username,
                 CONF_UGREEN_PASSWORD: self._ugr_password,
                 CONF_UGREEN_VERIFY_SSL: self._ugr_verify_ssl,
-                CONF_UGREEN_ALBUM_NAME: album_name,
+                CONF_UGREEN_ALBUM_UUID: album_uuid,
+                CONF_UGREEN_ALBUM_TYPE: album.get(
+                    "album_type", ugr_api.ALBUM_TYPE_REGULAR
+                ),
+                CONF_UGREEN_ALBUM_NAME: album["album_name"],
             }
-            return self.async_create_entry(title=album_name, data=data)
+            return self.async_create_entry(title=album["album_name"], data=data)
 
         # A searchable dropdown (rather than a plain vol.In) keeps this
         # usable for accounts with a large number of albums.
@@ -1236,7 +1239,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         ]
         schema = vol.Schema(
             {
-                vol.Required(CONF_UGREEN_ALBUM_NAME): selector.SelectSelector(
+                vol.Required(CONF_UGREEN_ALBUM_UUID): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=options,
                         mode=selector.SelectSelectorMode.DROPDOWN,

@@ -250,11 +250,11 @@ CONF_UGREEN_URL = "ugreen_url"
 CONF_UGREEN_USERNAME = "ugreen_username"
 CONF_UGREEN_PASSWORD = "ugreen_password"
 CONF_UGREEN_VERIFY_SSL = "ugreen_verify_ssl"
-# The album is identified by its human-readable name rather than its
-# ``album_uuid``/``album_type`` - both are looked up from ``album/list`` by
-# matching this name on every refresh, so editing this value (or an album
-# being recreated with the same name) does not require reconfiguring the
-# integration.
+# The album is stored by ``album_uuid`` + ``album_type`` (what the API needs),
+# so renaming it in UGOS Photos does not break the slideshow. The name is kept
+# for display only.
+CONF_UGREEN_ALBUM_UUID = "ugreen_album_uuid"
+CONF_UGREEN_ALBUM_TYPE = "ugreen_album_type"
 CONF_UGREEN_ALBUM_NAME = "ugreen_album_name"
 
 

@@ -92,7 +92,8 @@ from .const import (
     CONF_UGREEN_URL,
     CONF_UGREEN_USERNAME,
     CONF_UGREEN_PASSWORD,
-    CONF_UGREEN_ALBUM_NAME,
+    CONF_UGREEN_ALBUM_UUID,
+    CONF_UGREEN_ALBUM_TYPE,
     CONF_UGREEN_VERIFY_SSL,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
@@ -2016,17 +2017,20 @@ class AlbumCoordinator(DataUpdateCoordinator):
         """Fetch photos from a UGREEN NAS UGOS Photos album.
 
         Logs in fresh on every refresh, like the Synology provider. The
-        album is resolved by name each time, so a renamed/recreated album
-        that keeps the same name needs no reconfiguration.
+        album is addressed by its stored uuid, so renaming it in UGOS Photos
+        needs no reconfiguration.
         """
         from . import ugreen as ugr_api
 
         url = self.entry.data.get(CONF_UGREEN_URL)
         username = self.entry.data.get(CONF_UGREEN_USERNAME)
         password = self.entry.data.get(CONF_UGREEN_PASSWORD)
-        album_name = self.entry.data.get(CONF_UGREEN_ALBUM_NAME)
+        album_uuid = self.entry.data.get(CONF_UGREEN_ALBUM_UUID)
+        album_type = self.entry.data.get(
+            CONF_UGREEN_ALBUM_TYPE, ugr_api.ALBUM_TYPE_REGULAR
+        )
         verify_ssl = bool(self.entry.data.get(CONF_UGREEN_VERIFY_SSL, True))
-        if not url or not username or not password or not album_name:
+        if not url or not username or not password or not album_uuid:
             raise UpdateFailed("UGREEN provider is missing URL, credentials or album")
 
         client = ugr_api.UGreenClient(
@@ -2034,25 +2038,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
         )
         try:
             await client.async_login()
-            albums = await client.async_list_albums()
+            photos = await client.async_list_album_pictures(album_uuid, album_type)
         except ugr_api.UGreenAuthError as err:
             raise UpdateFailed(f"UGREEN login failed: {err}") from err
-        except ugr_api.UGreenApiError as err:
-            raise UpdateFailed(f"Error querying UGREEN Photos: {err}") from err
-
-        album = ugr_api.find_album_by_name(albums, album_name)
-        if album is None:
-            raise UpdateFailed(f"UGREEN album '{album_name}' was not found")
-        album_uuid = album["album_uuid"]
-        album_type = album.get("album_type", ugr_api.ALBUM_TYPE_REGULAR)
-
-        try:
-            photos = await client.async_list_album_pictures(album_uuid, album_type)
         except ugr_api.UGreenApiError as err:
             raise UpdateFailed(f"Error listing UGREEN album photos: {err}") from err
 
         if not photos:
-            raise UpdateFailed(f"No images found in UGREEN album '{album_name}'")
+            raise UpdateFailed(f"No images found in UGREEN album '{self.entry.title}'")
 
         # Stored so the camera can fetch image bytes server-side (session
         # cookie plus ``ugk``, added per request so stored URLs never carry it)

@@ -124,7 +124,7 @@
         "title": "UGREEN album",
         "description": "Pick the UGOS Photos album to show.",
         "data": {
-          "ugreen_album_name": "Album"
+          "ugreen_album_uuid": "Album"
         }
       },
       "nextcloud": {
