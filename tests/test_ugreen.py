@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from custom_components.album_slideshow import config_flow
 from custom_components.album_slideshow import coordinator as coordinator_module
 from custom_components.album_slideshow import ugreen as ugr
 from custom_components.album_slideshow.const import (
@@ -16,6 +17,7 @@ from custom_components.album_slideshow.const import (
     CONF_UGREEN_URL,
     CONF_UGREEN_USERNAME,
     CONF_UGREEN_VERIFY_SSL,
+    PROVIDER_UGREEN,
 )
 
 # A realistic item, shaped like a live ``album/picture/list`` response entry.
@@ -480,3 +482,9 @@ def test_update_ugreen_title_falls_back_to_entry_title(monkeypatch):
     coord = _ugreen_coordinator(monkeypatch)
     monkeypatch.setattr(_FakeUGreenClient, "album_name", ugr.UGreenApiError("album/list failed"))
     assert asyncio.run(coord._update_ugreen())["title"] == "Vacation Photos"
+
+
+def test_ugreen_entries_can_turn_off_reverse_geocoding():
+    entry = SimpleNamespace(data={"provider": PROVIDER_UGREEN}, options={})
+    flow = config_flow.ConfigFlow.async_get_options_flow(entry)
+    assert isinstance(flow, config_flow.LocalFolderOptionsFlow)

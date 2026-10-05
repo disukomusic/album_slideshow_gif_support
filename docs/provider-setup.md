@@ -651,6 +651,11 @@ NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
   after the first refresh, so the location attribute and caption may take a
   moment to appear, and stay empty for photos with no GPS data in UGOS
   Photos. There is no description/caption field in this API.
+- **Place names.** The NAS's own place name is used when it has one. Photos
+  with GPS but no NAS place name are labeled through OpenStreetMap Nominatim,
+  like the local folder provider; turn off **Reverse-geocode EXIF GPS
+  coordinates via OpenStreetMap** under the album's **Configure** to stop
+  those lookups.
 - The password is RSA-encrypted before it ever leaves Home Assistant, the
   same way the UGOS web app encrypts it. A fresh session is established on
   every refresh rather than persisting one.

@@ -396,8 +396,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.OptionsFlow:
         """Return the options flow handler.
 
-        Local-folder, Nextcloud and Ente entries expose the reverse-geocode
-        toggle; Immich entries reopen the albums/people/favorites picker.
+        Local-folder, Nextcloud, Ente and UGREEN entries expose the
+        reverse-geocode toggle; Immich entries reopen the
+        albums/people/favorites picker.
         Other providers get a no-op handler so that the "Configure" button
         doesn't appear empty in the UI.
 
@@ -411,6 +412,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             PROVIDER_LOCAL_FOLDER,
             PROVIDER_NEXTCLOUD,
             PROVIDER_ENTE,
+            PROVIDER_UGREEN,
         ):
             return LocalFolderOptionsFlow()
         if config_entry.data.get(CONF_PROVIDER) == PROVIDER_IMMICH:
