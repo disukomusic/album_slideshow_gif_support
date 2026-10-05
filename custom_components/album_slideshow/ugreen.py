@@ -60,7 +60,9 @@ _PICTURE_INFO_PATH = "/ugreen/v5/photo/picture/info"
 
 # ``album_type`` values from ``album/list``.
 ALBUM_TYPE_REGULAR = 1
-ALBUM_TYPE_CONDITIONAL = 2  # a saved search/filter (date range, media type, location, ...)
+ALBUM_TYPE_CONDITIONAL = (
+    2  # a saved search/filter (date range, media type, location, ...)
+)
 ALBUM_TYPE_BABY = 3
 
 _ALBUM_TYPE_LABELS = {
@@ -381,7 +383,7 @@ class UGreenClient:
                 "offset": offset,
                 "sort_by": 0,
                 "sort_order": 0,
-                "type_option": {"all": 1, "image": 0, "video": 0, "gif": 0, "live": 0},
+                "type_option": {"all": 0, "image": 1, "video": 0, "gif": 0, "live": 0},
                 "provider_option": {
                     "provider_mine": 1,
                     "provider_other": 1,
