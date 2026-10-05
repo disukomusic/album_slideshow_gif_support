@@ -93,6 +93,7 @@ from .const import (
     CONF_UGREEN_USERNAME,
     CONF_UGREEN_PASSWORD,
     CONF_UGREEN_ALBUM_NAME,
+    CONF_UGREEN_VERIFY_SSL,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     ENRICHING_PROVIDERS,
@@ -1102,8 +1103,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Query params added only at fetch time (UGREEN ``ugk``), so stored
         # URLs, attributes and logs never carry them.
         self.image_request_params: dict[str, str] = {}
-        # UGREEN only: its NAS web interface is normally self-signed, so the
-        # camera must skip TLS verification when fetching image bytes for it.
+        # False when the entry opted out of TLS certificate checks (UGREEN NAS
+        # with a self-signed certificate).
         self.image_request_verify_ssl: bool = True
         # Ente only: file id -> {key, header, thumbnail}, the material needed
         # to decrypt each image. Rebuilt on every album refresh.
@@ -2024,10 +2025,13 @@ class AlbumCoordinator(DataUpdateCoordinator):
         username = self.entry.data.get(CONF_UGREEN_USERNAME)
         password = self.entry.data.get(CONF_UGREEN_PASSWORD)
         album_name = self.entry.data.get(CONF_UGREEN_ALBUM_NAME)
+        verify_ssl = bool(self.entry.data.get(CONF_UGREEN_VERIFY_SSL, True))
         if not url or not username or not password or not album_name:
             raise UpdateFailed("UGREEN provider is missing URL, credentials or album")
 
-        client = ugr_api.UGreenClient(self.hass, url, username, password)
+        client = ugr_api.UGreenClient(
+            self.hass, url, username, password, verify_ssl=verify_ssl
+        )
         try:
             await client.async_login()
             albums = await client.async_list_albums()
@@ -2052,10 +2056,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
         # Stored so the camera can fetch image bytes server-side (session
         # cookie plus ``ugk``, added per request so stored URLs never carry it)
-        # and skip TLS verification for this NAS's self-signed cert.
+        # with the same TLS setting as the login.
         self.image_request_headers = dict(client.image_headers)
         self.image_request_params = dict(client.image_params)
-        self.image_request_verify_ssl = False
+        self.image_request_verify_ssl = verify_ssl
         # Kept for the background enrichment pass (GPS/address lookups),
         # which needs a logged-in client and the album context per photo.
         self._ugreen_client = client

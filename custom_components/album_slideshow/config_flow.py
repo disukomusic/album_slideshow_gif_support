@@ -103,6 +103,7 @@ from .const import (
     CONF_UGREEN_USERNAME,
     CONF_UGREEN_PASSWORD,
     CONF_UGREEN_ALBUM_NAME,
+    CONF_UGREEN_VERIFY_SSL,
     DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
@@ -383,6 +384,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._ugr_url: str | None = None
         self._ugr_username: str | None = None
         self._ugr_password: str | None = None
+        self._ugr_verify_ssl: bool = True
         self._ugr_albums: list[dict[str, Any]] = []
 
     @staticmethod
@@ -1144,10 +1146,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             url = user_input[CONF_UGREEN_URL].strip()
             username = user_input[CONF_UGREEN_USERNAME].strip()
             password = user_input.get(CONF_UGREEN_PASSWORD) or ""
+            verify_ssl = bool(user_input.get(CONF_UGREEN_VERIFY_SSL, True))
 
             from . import ugreen as ugr_api
 
-            client = ugr_api.UGreenClient(self.hass, url, username, password)
+            client = ugr_api.UGreenClient(
+                self.hass, url, username, password, verify_ssl=verify_ssl
+            )
             albums: list[dict[str, Any]] = []
             try:
                 await client.async_login()
@@ -1173,6 +1178,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._ugr_url = client.base_url
                 self._ugr_username = username
                 self._ugr_password = password
+                self._ugr_verify_ssl = verify_ssl
                 self._ugr_albums = named_albums
                 return await self.async_step_ugreen_select()
 
@@ -1183,6 +1189,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_UGREEN_PASSWORD): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
+                vol.Optional(CONF_UGREEN_VERIFY_SSL, default=True): bool,
             }
         )
         return self.async_show_form(step_id="ugreen", data_schema=schema, errors=errors)
@@ -1213,6 +1220,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_UGREEN_URL: self._ugr_url,
                 CONF_UGREEN_USERNAME: self._ugr_username,
                 CONF_UGREEN_PASSWORD: self._ugr_password,
+                CONF_UGREEN_VERIFY_SSL: self._ugr_verify_ssl,
                 CONF_UGREEN_ALBUM_NAME: album_name,
             }
             return self.async_create_entry(title=album_name, data=data)

@@ -116,7 +116,8 @@
         "data": {
           "ugreen_url": "NAS URL",
           "ugreen_username": "Username",
-          "ugreen_password": "Password"
+          "ugreen_password": "Password",
+          "ugreen_verify_ssl": "Verify SSL certificate"
         }
       },
       "ugreen_select": {
@@ -190,7 +191,7 @@
       "nextcloud_public_cannot_connect": "Could not connect to that Nextcloud album. Check the link is still valid.",
       "invalid_ente_url": "That does not look like an Ente public album link. It should look like {example_url}, including the part after the #.",
       "ente_cannot_connect": "Could not open that Ente album. The link may be expired, revoked, or password-protected.",
-      "ugreen_cannot_connect": "Could not connect to the UGREEN NAS. Check the URL, username and password.",
+      "ugreen_cannot_connect": "Could not connect to the UGREEN NAS. Check the URL, username and password. If the NAS uses a self-signed certificate, turn off Verify SSL certificate.",
       "ugreen_no_albums": "No albums were found on this UGREEN NAS."
     }
   },

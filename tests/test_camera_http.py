@@ -51,6 +51,7 @@ class _Response:
 class _Hass:
     def __init__(self):
         self.data = {}
+        self.verify_ssl = None
 
     async def async_add_executor_job(self, func, *args):
         return func(*args)
@@ -74,7 +75,12 @@ def make_camera(monkeypatch):
             return response
 
         session = SimpleNamespace(get=get)
-        monkeypatch.setattr(camera, "async_get_clientsession", lambda _hass: session)
+
+        def get_session(hass, verify_ssl=True):
+            hass.verify_ssl = verify_ssl
+            return session
+
+        monkeypatch.setattr(camera, "async_get_clientsession", get_session)
         cam = camera.AlbumSlideshowCamera.__new__(camera.AlbumSlideshowCamera)
         cam.hass = _Hass()
         cam.coordinator = SimpleNamespace(image_request_headers=None)
@@ -117,7 +123,18 @@ def test_redirect_into_icloud_uses_final_response_hostname(make_camera):
     cam, _response, requests = make_camera()
     source_url = "https://www.icloud.com/image-redirect"
     assert asyncio.run(cam._http_get(source_url)) == b"image-bytes"
-    assert requests == [(source_url, {"headers": None, "params": None, "ssl": True})]
+    assert requests == [(source_url, {"headers": None, "params": None})]
+
+
+def test_tls_verification_follows_the_coordinator(make_camera):
+    cam, _response, _requests = make_camera()
+    asyncio.run(cam._http_get(_ICLOUD_URL))
+    assert cam.hass.verify_ssl is True
+    cam.coordinator = SimpleNamespace(
+        image_request_headers=None, image_request_verify_ssl=False,
+    )
+    asyncio.run(cam._http_get(_ICLOUD_URL))
+    assert cam.hass.verify_ssl is False
 
 
 def test_fetch_time_params_are_sent_but_kept_out_of_error_logs(make_camera, caplog):

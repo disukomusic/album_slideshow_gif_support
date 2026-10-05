@@ -633,7 +633,8 @@ NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
 
 1. Add the integration and choose **UGREEN NAS (UGOS Photos, experimental)**.
 2. Enter your NAS address including port (e.g. `https://192.168.1.10:9443`)
-   and an account username and password.
+   and an account username and password. Leave **Verify SSL certificate** on
+   unless the NAS uses a self-signed certificate (see the notes below).
 3. Pick the album to show from the live, searchable dropdown; each entry
    shows its album type (see below) to help tell same-named albums apart.
 
@@ -653,8 +654,10 @@ NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
   every refresh rather than persisting one.
 - **Two-factor authentication is not yet supported.** Use an account without
   2FA enabled for now; support for it is planned.
-- UGOS NAS web interfaces are normally reached over a self-signed HTTPS
-  certificate, so this provider does not verify the TLS certificate.
+- **Self-signed certificates.** UGOS web interfaces often use a self-signed
+  HTTPS certificate, which fails verification. Turning off **Verify SSL
+  certificate** lets the connection through without checking which server
+  it reaches, so only do that on a network you trust.
 - New photos added to the album show up on the next refresh.
 
 > **Use a dedicated account.** Create a separate UGOS account for Home

@@ -338,7 +338,18 @@ def test_async_get_picture_info_returns_data():
     assert url.endswith(ugr._PICTURE_INFO_PATH)
     assert kwargs["params"]["picture_id"] == 3
     assert kwargs["params"]["source_album_uuid"] == "uuid-1"
-    assert kwargs["ssl"] is False
+    assert "ssl" not in kwargs
+
+
+def test_session_follows_verify_ssl(monkeypatch):
+    chosen = []
+    monkeypatch.setattr(
+        ugr, "async_get_clientsession",
+        lambda _hass, verify_ssl=True: chosen.append(verify_ssl),
+    )
+    ugr.UGreenClient(None, "https://nas:9443", "user", "pw")._session()
+    ugr.UGreenClient(None, "https://nas:9443", "user", "pw", verify_ssl=False)._session()
+    assert chosen == [True, False]
 
 
 def test_async_get_picture_info_raises_on_error_code():

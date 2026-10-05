@@ -226,11 +226,14 @@ def parse_picture_location(info: dict[str, Any]) -> dict[str, Any]:
 class UGreenClient:
     """Thin async wrapper over the undocumented UGOS Photos web API."""
 
-    def __init__(self, hass, url: str, username: str, password: str) -> None:
+    def __init__(
+        self, hass, url: str, username: str, password: str, *, verify_ssl: bool = True
+    ) -> None:
         self.hass = hass
         self.base_url = normalize_base_url(url)
         self.username = username
         self.password = password
+        self.verify_ssl = verify_ssl
         self._uid: Any = None
         self._plain_token: str | None = None
         self._static_token: str | None = None
@@ -252,7 +255,7 @@ class UGreenClient:
         return {"Cookie": f"token_uid={self._uid}; token={self._auth_token_header()}"}
 
     def _session(self):
-        return async_get_clientsession(self.hass)
+        return async_get_clientsession(self.hass, verify_ssl=self.verify_ssl)
 
     def _auth_token_header(self) -> str:
         assert self._plain_token and self._token_public_key
@@ -282,7 +285,6 @@ class UGreenClient:
                 session.post(
                     f"{self.base_url}{_CHECK_PATH}",
                     json={"username": self.username},
-                    ssl=False,
                 ) as resp,
             ):
                 rsa_token_b64 = resp.headers.get("x-rsa-token")
@@ -309,7 +311,6 @@ class UGreenClient:
                         "otp": True,
                         "is_simple": True,
                     },
-                    ssl=False,
                 ) as resp,
             ):
                 data = await resp.json(content_type=None)
@@ -341,7 +342,6 @@ class UGreenClient:
                 json=body,
                 headers=self._auth_headers(),
                 cookies=self._auth_cookies(),
-                ssl=False,
             ) as resp,
         ):
             return await resp.json(content_type=None)
@@ -428,7 +428,6 @@ class UGreenClient:
                 params=params,
                 headers=self._auth_headers(),
                 cookies=self._auth_cookies(),
-                ssl=False,
             ) as resp,
         ):
             data = await resp.json(content_type=None)

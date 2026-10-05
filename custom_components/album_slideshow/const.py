@@ -244,11 +244,12 @@ PHOTOPRISM_SELECTION_COMPOSITE = "composite"
 # UGREEN NAS (UGOS Photos) provider. Talks to the undocumented UGOS Photos
 # web API (see ``ugreen.py``); login is username + password, with the
 # password RSA-encrypted before it ever leaves HA, same as the UGOS web app.
-# UGOS NAS web interfaces are normally self-signed HTTPS, so this provider
-# does not verify the TLS certificate.
+# TLS certificates are verified unless the user turns that off for a NAS with
+# a self-signed certificate.
 CONF_UGREEN_URL = "ugreen_url"
 CONF_UGREEN_USERNAME = "ugreen_username"
 CONF_UGREEN_PASSWORD = "ugreen_password"
+CONF_UGREEN_VERIFY_SSL = "ugreen_verify_ssl"
 # The album is identified by its human-readable name rather than its
 # ``album_uuid``/``album_type`` - both are looked up from ``album/list`` by
 # matching this name on every refresh, so editing this value (or an album
