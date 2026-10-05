@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from custom_components.album_slideshow import coordinator as coordinator_module
 from custom_components.album_slideshow import ugreen as ugr
+from custom_components.album_slideshow.const import (
+    CONF_UGREEN_ALBUM_TYPE,
+    CONF_UGREEN_ALBUM_UUID,
+    CONF_UGREEN_PASSWORD,
+    CONF_UGREEN_URL,
+    CONF_UGREEN_USERNAME,
+    CONF_UGREEN_VERIFY_SSL,
+)
 
 # A realistic item, shaped like a live ``album/picture/list`` response entry.
 SAMPLE_PICTURE = {
@@ -376,3 +386,72 @@ def test_async_get_picture_info_raises_on_error_code():
         assert False, "expected UGreenApiError"
     except ugr.UGreenApiError:
         pass
+
+
+# ── AlbumCoordinator._update_ugreen ────────────────────────────────────────
+
+class _FakeUGreenClient:
+    """Stands in for a logged-in client; every login gets its own ``ugk``."""
+
+    def __init__(self, hass, url, username, password, *, verify_ssl=True):
+        self.base_url = ugr.normalize_base_url(url)
+        self.verify_ssl = verify_ssl
+        self.listed = []
+        self.image_headers = {"Cookie": "token_uid=1000; token=enc"}
+        self.image_params = {}
+
+    async def async_login(self):
+        self.image_params = {"ugk": f"SESSIONKEY-{id(self)}"}
+
+    async def async_list_album_pictures(self, album_uuid, album_type):
+        self.listed.append((album_uuid, album_type))
+        return [
+            SAMPLE_PICTURE,
+            dict(SAMPLE_PICTURE, picture_id=3, file_name="clip.MOV", real_ext_name="mov"),
+            dict(SAMPLE_PICTURE, picture_id=4, file_name="IMG_0004.mp4", real_ext_name=""),
+        ]
+
+
+def _ugreen_coordinator(monkeypatch, **data):
+    monkeypatch.setattr(ugr, "UGreenClient", _FakeUGreenClient)
+    coord = coordinator_module.AlbumCoordinator.__new__(coordinator_module.AlbumCoordinator)
+    coord.hass = None
+    coord.entry = SimpleNamespace(title="Vacation Photos", data={
+        CONF_UGREEN_URL: "https://nas:9443/",
+        CONF_UGREEN_USERNAME: "user",
+        CONF_UGREEN_PASSWORD: "pw",
+        CONF_UGREEN_ALBUM_UUID: "uuid-1",
+        CONF_UGREEN_ALBUM_TYPE: ugr.ALBUM_TYPE_CONDITIONAL,
+        **data,
+    })
+    return coord
+
+
+def test_update_ugreen_builds_token_free_photo_items(monkeypatch):
+    coord = _ugreen_coordinator(monkeypatch, **{CONF_UGREEN_VERIFY_SSL: False})
+    items = asyncio.run(coord._update_ugreen())["items"]
+
+    assert [item.source_id for item in items] == ["2"]
+    assert "ugk" not in items[0].url
+    assert "source_album_uuid=uuid-1" in items[0].url
+    assert "source_album_type=2" in items[0].url
+    assert coord._ugreen_client.listed == [("uuid-1", ugr.ALBUM_TYPE_CONDITIONAL)]
+    assert coord.image_request_params == coord._ugreen_client.image_params
+    assert coord.image_request_headers == {"Cookie": "token_uid=1000; token=enc"}
+    assert coord._ugreen_client.verify_ssl is False
+    assert coord.image_request_verify_ssl is False
+
+
+def test_update_ugreen_urls_survive_a_new_login(monkeypatch):
+    coord = _ugreen_coordinator(monkeypatch)
+    first = asyncio.run(coord._update_ugreen())["items"]
+    first_params = coord.image_request_params
+    first[0].latitude, first[0].longitude, first[0].exif_scanned = 52.52, 13.405, True
+
+    second = asyncio.run(coord._update_ugreen())["items"]
+    coordinator_module._merge_prior_enrichment(second, first)
+
+    assert coord.image_request_params != first_params
+    assert second[0].url == first[0].url
+    assert second[0].exif_scanned and second[0].latitude == 52.52
+    assert coord.image_request_verify_ssl is True
