@@ -175,7 +175,14 @@ import homeassistant.components.sensor as _sensor
 
 
 class _SensorEntity:
-    pass
+    async def async_added_to_hass(self):
+        pass
+
+    def async_on_remove(self, func):
+        self.__dict__.setdefault("_on_remove", []).append(func)
+
+    def async_write_ha_state(self):
+        pass
 
 
 _sensor.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
@@ -209,10 +216,11 @@ _selector.BooleanSelector = _SelectorBase  # type: ignore[attr-defined]
 
 _make_stub(
     "homeassistant.components.number", "homeassistant.components.select",
-    "homeassistant.helpers.restore_state",
+    "homeassistant.components.text", "homeassistant.helpers.restore_state",
 )
 import homeassistant.components.number as _number
 import homeassistant.components.select as _select
+import homeassistant.components.text as _text
 import homeassistant.helpers.restore_state as _restore_state
 
 
@@ -240,4 +248,5 @@ class _SelectEntity:
 _number.NumberEntity = _NumberEntity
 _number.NumberMode = types.SimpleNamespace(BOX="box", SLIDER="slider")
 _select.SelectEntity = _SelectEntity
+_text.TextEntity = type("TextEntity", (), {})
 _restore_state.RestoreEntity = _RestoreEntity
