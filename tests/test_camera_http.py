@@ -5,6 +5,7 @@ import asyncio
 import io
 from types import SimpleNamespace
 
+from aiohttp import ClientResponseError, RequestInfo
 from multidict import CIMultiDict
 from PIL import Image, UnidentifiedImageError
 import pytest
@@ -116,7 +117,29 @@ def test_redirect_into_icloud_uses_final_response_hostname(make_camera):
     cam, _response, requests = make_camera()
     source_url = "https://www.icloud.com/image-redirect"
     assert asyncio.run(cam._http_get(source_url)) == b"image-bytes"
-    assert requests == [(source_url, {"headers": None, "ssl": True})]
+    assert requests == [(source_url, {"headers": None, "params": None, "ssl": True})]
+
+
+def test_fetch_time_params_are_sent_but_kept_out_of_error_logs(make_camera, caplog):
+    source_url = "https://nas.example/ugreen/v5/photo/picture/stream?id=2"
+    cam, response, requests = make_camera(source_url, headers={"Content-Type": "image/jpeg"})
+    cam.coordinator = SimpleNamespace(
+        image_request_headers=None, image_request_params={"ugk": "SECRET"},
+    )
+    assert asyncio.run(cam._http_get(source_url)) == b"image-bytes"
+    assert requests[0][1]["params"] == {"ugk": "SECRET"}
+
+    real_url = URL(source_url).update_query(ugk="SECRET")
+
+    def raise_for_status():
+        raise ClientResponseError(
+            RequestInfo(real_url, "GET", CIMultiDict(), real_url), (), status=401,
+        )
+
+    response.raise_for_status = raise_for_status
+    assert asyncio.run(cam._http_get(source_url)) is None
+    assert "HTTP 401" in caplog.text
+    assert "SECRET" not in caplog.text
 
 
 def test_redirect_away_from_icloud_does_not_inherit_binary_exception(make_camera):

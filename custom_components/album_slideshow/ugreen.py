@@ -14,7 +14,7 @@ Login flow (mirrors the web app's own login):
    own "encryptLong" scheme (see :func:`_rsa_encrypt_long`).
 3. ``POST /ugreen/v1/verify/login`` with the encrypted password. The
    response's ``data`` carries a short plaintext ``token``, a ``static_token``
-   (reused verbatim as the ``ugk`` query param on every image URL), a second
+   (sent as the ``ugk`` query param on every image request), a second
    RSA public key (``public_key``, used to encrypt ``token`` for subsequent
    requests), and the account id (``uid``, sent as the ``token_uid`` cookie).
 4. Every authenticated call sends a ``token_uid``/``token`` cookie, an
@@ -111,16 +111,16 @@ def build_image_url(
     base_url: str,
     picture_id: Any,
     source_album_uuid: str,
-    static_token: str,
     *,
     source_album_type: int = ALBUM_TYPE_REGULAR,
     size_type: int = STREAM_SIZE_THUMBNAIL,
     upload_time: Any = 0,
     client_id: str = "home-assistant-album-slideshow-WEB",
 ) -> str:
-    """Build a ``picture/stream`` URL for a photo id.
+    """Build a token-free ``picture/stream`` URL for a photo id.
 
-    ``static_token`` is reused unchanged for every photo in the session.
+    The session's ``ugk`` is added only at fetch time (see
+    :attr:`UGreenClient.image_params`), so stored URLs stay stable and secret-free.
     """
     params = {
         "id": picture_id,
@@ -129,7 +129,6 @@ def build_image_url(
         "source_album_type": source_album_type,
         "client_id": client_id,
         "upload_time": upload_time,
-        "ugk": static_token,
     }
     return f"{normalize_base_url(base_url)}{_PICTURE_STREAM_PATH}?{urlencode(params)}"
 
@@ -239,9 +238,11 @@ class UGreenClient:
         self._token_public_key: bytes | None = None
 
     @property
-    def static_token(self) -> str | None:
-        """The ``ugk`` value to use when building image URLs."""
-        return self._static_token
+    def image_params(self) -> dict[str, str]:
+        """``ugk`` query param the camera adds when fetching image bytes."""
+        if not self._static_token:
+            return {}
+        return {"ugk": self._static_token}
 
     @property
     def image_headers(self) -> dict[str, str]:

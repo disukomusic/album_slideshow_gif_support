@@ -1099,6 +1099,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Extra headers the camera must send when fetching image bytes
         # (Immich API key). Empty for providers that need no auth.
         self.image_request_headers: dict[str, str] = {}
+        # Query params added only at fetch time (UGREEN ``ugk``), so stored
+        # URLs, attributes and logs never carry them.
+        self.image_request_params: dict[str, str] = {}
         # UGREEN only: its NAS web interface is normally self-signed, so the
         # camera must skip TLS verification when fetching image bytes for it.
         self.image_request_verify_ssl: bool = True
@@ -2048,8 +2051,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"No images found in UGREEN album '{album_name}'")
 
         # Stored so the camera can fetch image bytes server-side (session
-        # cookie) and skip TLS verification for this NAS's self-signed cert.
+        # cookie plus ``ugk``, added per request so stored URLs never carry it)
+        # and skip TLS verification for this NAS's self-signed cert.
         self.image_request_headers = dict(client.image_headers)
+        self.image_request_params = dict(client.image_params)
         self.image_request_verify_ssl = False
         # Kept for the background enrichment pass (GPS/address lookups),
         # which needs a logged-in client and the album context per photo.
@@ -2057,7 +2062,6 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self._ugreen_album_uuid = album_uuid
         self._ugreen_album_type = album_type
 
-        static_token = client.static_token
         items: list[MediaItem] = []
         for p in photos:
             picture_id = p.get("picture_id")
@@ -2070,7 +2074,6 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         client.base_url,
                         picture_id,
                         album_uuid,
-                        static_token,
                         source_album_type=album_type,
                         upload_time=p.get("upload_time", 0),
                     ),
@@ -2612,9 +2615,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         """Fetch GPS coordinates and a location label for one UGREEN photo.
 
         Reuses the client stashed by ``_update_ugreen`` instead of logging in
-        again per photo. The image URL changes every refresh (fresh login),
-        so ``_merge_prior_enrichment`` can't carry this forward - every photo
-        is re-fetched each refresh.
+        again per photo. Image URLs are stable across refreshes, so
+        ``_merge_prior_enrichment`` carries results forward and only new
+        photos are looked up.
         """
         from . import ugreen as ugr_api
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import async_timeout
+from aiohttp import ClientResponseError
 from PIL import Image
 
 from homeassistant.components.camera import Camera
@@ -1581,6 +1582,13 @@ class AlbumSlideshowCamera(Camera):
             return dict(headers)
         return None
 
+    def _image_request_params(self, url: str) -> dict[str, str] | None:
+        """Session query params added at fetch time only (UGREEN ``ugk``)."""
+        params = getattr(self.coordinator, "image_request_params", None)
+        if params and isinstance(url, str) and url.startswith("http"):
+            return dict(params)
+        return None
+
     async def _http_get(self, url: str) -> bytes | None:
         """Fetch one remote image with validation and a hard timeout."""
         session = async_get_clientsession(self.hass)
@@ -1588,7 +1596,10 @@ class AlbumSlideshowCamera(Camera):
         try:
             async with async_timeout.timeout(30):
                 async with session.get(
-                    url, headers=self._image_request_headers(url), ssl=verify_ssl
+                    url,
+                    headers=self._image_request_headers(url),
+                    params=self._image_request_params(url),
+                    ssl=verify_ssl,
                 ) as resp:
                     resp.raise_for_status()
 
@@ -1639,6 +1650,12 @@ class AlbumSlideshowCamera(Camera):
                             return None
                         chunks.append(chunk)
                     return b"".join(chunks)
+        except ClientResponseError as err:
+            # str(err) includes the full request URL, fetch-time params and all.
+            _LOGGER.warning(
+                "Album Slideshow: failed to fetch image %s: HTTP %s", url, err.status
+            )
+            return None
         except Exception as err:
             _LOGGER.warning("Album Slideshow: failed to fetch image: %s", err)
             return None

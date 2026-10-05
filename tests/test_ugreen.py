@@ -87,15 +87,20 @@ def test_rsa_encrypt_long_empty_string():
 # ── build_image_url ────────────────────────────────────────────────────────
 
 def test_build_image_url_includes_required_params():
-    url = ugr.build_image_url(
-        "https://nas:9443/", 2, "uuid-1", "STATICTOKEN", upload_time=1791019939
-    )
+    url = ugr.build_image_url("https://nas:9443/", 2, "uuid-1", upload_time=1791019939)
     assert url.startswith("https://nas:9443/ugreen/v5/photo/picture/stream?")
     assert "id=2" in url
     assert "source_album_uuid=uuid-1" in url
     assert "source_album_type=1" in url
-    assert "ugk=STATICTOKEN" in url
     assert "upload_time=1791019939" in url
+    assert "ugk" not in url
+
+
+def test_image_params_carry_static_token_only_after_login():
+    c = ugr.UGreenClient(None, "https://nas:9443", "user", "pw")
+    assert c.image_params == {}
+    c._static_token = "STATICTOKEN"
+    assert c.image_params == {"ugk": "STATICTOKEN"}
 
 
 # ── find_album_by_name ──────────────────────────────────────────────────────
