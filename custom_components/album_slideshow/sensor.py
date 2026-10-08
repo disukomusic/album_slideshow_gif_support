@@ -22,7 +22,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         CacheUsageSensor(entry, coordinator),
         HiddenPhotoCountSensor(entry, coordinator),
     ]
-    if coordinator.provider in ENRICHING_PROVIDERS:
+    if (
+        coordinator.provider in ENRICHING_PROVIDERS
+        or coordinator.google_metadata_enabled
+        or coordinator.google_location_enabled
+    ):
         # Diagnostic surface for the background enrichment pass (per-photo
         # metadata reads and/or reverse-geocode). Providers with nothing to
         # enrich omit it to keep the device screen tidy.
@@ -37,7 +41,13 @@ class _BaseAlbumSensor(SensorEntity):
     def __init__(self, entry: ConfigEntry, coordinator: AlbumCoordinator) -> None:
         self.entry = entry
         self.coordinator = coordinator
-        coordinator.async_add_listener(self.async_write_ha_state)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Disabled entities are constructed but never added, so subscribe here.
+        self.async_on_remove(
+            self.coordinator.async_add_listener(self.async_write_ha_state)
+        )
 
     @property
     def device_info(self):
@@ -76,7 +86,10 @@ class HiddenPhotoCountSensor(_BaseAlbumSensor):
         super().__init__(entry, coordinator)
         self._attr_unique_id = f"{entry.entry_id}_hidden_photo_count"
         self._attr_name = "Hidden photos"
-        coordinator.store.add_listener(self.async_write_ha_state)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.coordinator.store.add_listener(self.async_write_ha_state)
 
     @property
     def native_value(self):

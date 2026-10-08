@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 import shutil
@@ -106,6 +107,98 @@ async def _camera(items, monkeypatch, *, paired=False):
             cam._download_cache.put(item.url, output.getvalue())
     await cam._rebuild_current_frame()
     return cam
+
+
+def test_custom_lookback_invalidates_playlist_and_preserves_hidden_photos(monkeypatch):
+    async def run():
+        from custom_components.album_slideshow.const import DATE_FILTER_CUSTOM
+
+        items = [_item("old", "https://example.test/old"), _item("recent", "https://example.test/recent")]
+        now = datetime.now(timezone.utc)
+        items[0].captured_at = int((now - timedelta(days=1500)).timestamp() * 1000)
+        items[1].captured_at = int((now - timedelta(days=10)).timestamp() * 1000)
+        cam = await _camera(items, monkeypatch)
+        cam.store.date_filter = DATE_FILTER_CUSTOM
+        cam.store.custom_lookback_days = 365
+        assert cam._effective_items() == [items[1]]
+        cam.store.custom_lookback_days = 1825
+        assert cam._effective_items() == items
+        cam.store.hidden_photo_ids = frozenset([items[0].photo_id])
+        cam.store.hidden_revision += 1
+        assert cam._effective_items() == [items[1]]
+        attributes = cam.extra_state_attributes
+        assert attributes["custom_lookback_days"] == 1825
+        assert attributes["shuffle_age_bias"] == 0
+
+    asyncio.run(run())
+
+
+def test_debug_overlay_rebuilds_buffers_without_changing_exclusions(monkeypatch):
+    async def run():
+        cam = await _camera([_item("photo-a")], monkeypatch)
+        original = cam._current_frame.data
+        hidden = cam.store.hidden_photo_ids
+        cam._next_frames.append(cam._current_frame)
+
+        cam.store.face_debug = True
+        cam.store.notify()
+
+        assert cam._timeline_dirty
+        assert cam._crop_hints(None).debug is True
+        await cam._rebuild_current_frame()
+        assert cam._current_frame.data != original
+        assert cam.store.hidden_photo_ids == hidden
+
+        cam.store.face_debug = False
+        cam.store.notify()
+        await cam._rebuild_current_frame()
+        assert cam._current_frame.data == original
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_camera_metadata_attributes_follow_displayed_photos(monkeypatch, paired):
+    async def run():
+        first = _item("first", "https://example.test/first")
+        second = _item("second", "https://example.test/second")
+        first.camera_metadata = {"camera_make": "Apple", "camera_model": "iPhone 7", "iso": 20}
+        second.camera_metadata = {"camera_make": "Other", "camera_model": "Camera", "iso": 100}
+        first.description = "First photo description"
+        second.description = "Second photo description"
+        cam = await _camera([first, second], monkeypatch, paired=paired)
+
+        attributes = cam.extra_state_attributes
+
+        assert attributes["camera_model"] == "iPhone 7"
+        assert attributes["iso"] == 20
+        assert attributes["exposure_time_seconds"] is None
+        assert attributes["description"] == "First photo description"
+        frames = attributes["caption_frames"]
+        assert frames[0]["camera_model"] == "iPhone 7"
+        assert frames[0]["description"] == "First photo description"
+        if paired:
+            assert frames[1]["camera_model"] == "Camera"
+            assert frames[1]["iso"] == 100
+            assert frames[1]["description"] == "Second photo description"
+
+    asyncio.run(run())
+
+
+def test_unload_stops_old_source_enrichment():
+    async def run():
+        coord = SimpleNamespace(_cancel_enrichment=AsyncMock())
+        hass = SimpleNamespace(
+            data={integration.DOMAIN: {"entry": {"coordinator": coord}}},
+            config_entries=SimpleNamespace(async_unload_platforms=AsyncMock(return_value=True)),
+        )
+
+        assert await integration.async_unload_entry(hass, SimpleNamespace(entry_id="entry"))
+
+        coord._cancel_enrichment.assert_awaited_once()
+        assert "entry" not in hass.data[integration.DOMAIN]
+
+    asyncio.run(run())
 
 
 def test_hide_clears_history_and_preloads_and_filters_the_cached_pool(monkeypatch):

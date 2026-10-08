@@ -50,6 +50,7 @@ sources provide dates, locations, and descriptions.
 | <a id="ente-photos"></a><a id="image-quality-5"></a><a id="self-hosted-ente"></a><a id="notes-5"></a>[Ente Photos](docs/provider-setup.md#ente-photos) | Public album link; decrypted inside Home Assistant |
 | <a id="local-folder-or-nas"></a><a id="-exif-capture-date--location-local--nas-only"></a>[Local Folder / NAS](docs/provider-setup.md#local-folder-or-nas) | Folder accessible to Home Assistant |
 | <a id="media-source-local-media-jellyfin-"></a><a id="how-to-find-the-media-source-id"></a><a id="️-metadata-limitation"></a>[Media Source](docs/provider-setup.md#media-source) | Home Assistant media browser, including local media and Jellyfin |
+| <a id="ugreen-nas-ugos-photos"></a><a id="notes-6"></a>[UGREEN NAS (UGOS Photos)](docs/provider-setup.md#ugreen-nas-ugos-photos) | NAS account; experimental, undocumented API |
 
 <a id="-installation"></a>
 ## Installation

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from custom_components.album_slideshow import playlist
 from custom_components.album_slideshow.const import (
+    DATE_FILTER_CUSTOM,
     DATE_FILTER_LAST_7,
     DATE_FILTER_LAST_30,
     DATE_FILTER_OFF,
@@ -36,6 +39,44 @@ def _ms(year: int, month: int, day: int) -> int:
 
 # A fixed "now" used for all date filter tests.
 _NOW = datetime(2026, 4, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(("bias", "expected"), [
+    (0, [1, 1, 1]), (100, [1, 5.5, 10]), (-100, [10, 5.5, 1]),
+    (50, [1, 3.25, 5.5]), (-50, [5.5, 3.25, 1]),
+])
+def test_age_weights_adjust_in_both_directions(bias, expected):
+    items = [_Item("old", captured_at=-1000), _Item("middle", captured_at=0), _Item("new", captured_at=1000)]
+    assert playlist.age_weights(items, bias) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("bias", [100, -100])
+def test_age_weights_keep_undated_photos_neutral(bias):
+    items = [_Item("old", captured_at=0), _Item("new", captured_at=1000), _Item("missing")]
+    assert playlist.age_weights(items, bias)[2] == 1
+
+
+def test_age_weights_use_uploaded_date_only_when_requested():
+    items = [_Item("old", captured_at=0), _Item("recent", uploaded_at=1000)]
+    assert playlist.age_weights(items, 100) == [1, 10]
+    assert playlist.age_weights(items, 100, missing_date=MISSING_DATE_INCLUDE) == [1, 1]
+    assert playlist.age_weights(items, 100, missing_date=MISSING_DATE_EXCLUDE) == [1, 1]
+
+
+@pytest.mark.parametrize("items", [[], [_Item("only")], [_Item("a", 1), _Item("b", 1)]])
+def test_age_weights_without_a_date_range_are_uniform(items):
+    assert playlist.age_weights(items, 100) == [1.0] * len(items)
+
+
+@pytest.mark.parametrize("bias", [None, True, float("nan"), float("inf"), "newer"])
+def test_age_weights_reject_invalid_bias(bias):
+    assert playlist.age_weights([_Item("a", 0), _Item("b", 1000)], bias) == [1, 1]
+
+
+def test_age_weights_clamp_strength_without_excluding_photos():
+    items = [_Item("a", 0), _Item("b", 1000)]
+    assert playlist.age_weights(items, 1000) == [1, 10]
+    assert playlist.age_weights(items, -1000) == [10, 1]
 
 
 # -- order_items ------------------------------------------------------------
@@ -160,6 +201,52 @@ def test_filter_on_this_day_drops_undated():
     out = [it.url for it in playlist.filter_items(items, mode=DATE_FILTER_ON_THIS_DAY, now=_NOW)]
     # On-this-day is strict - undated items can't satisfy it, so they are dropped.
     assert out == ["anniversary"]
+
+
+@pytest.mark.parametrize("days", [1, 7, 30, 365, 1825, 36500])
+def test_custom_lookback_includes_exact_cutoff(days):
+    cutoff = int((_NOW - timedelta(days=days)).timestamp() * 1000)
+    items = [
+        _Item("too_old", captured_at=cutoff - 1),
+        _Item("boundary", captured_at=cutoff),
+        _Item("recent", captured_at=int(_NOW.timestamp() * 1000)),
+    ]
+
+    result = playlist.filter_items(items, mode=DATE_FILTER_CUSTOM, lookback_days=days, now=_NOW)
+
+    assert [item.url for item in result] == ["boundary", "recent"]
+
+
+@pytest.mark.parametrize(("missing_date", "expected"), [
+    (MISSING_DATE_INCLUDE, ["no_date", "old_upload", "recent_upload", "dated"]),
+    (MISSING_DATE_USE_UPLOADED, ["no_date", "recent_upload", "dated"]),
+    (MISSING_DATE_EXCLUDE, ["dated"]),
+])
+def test_custom_lookback_respects_missing_date_policy(missing_date, expected):
+    items = [
+        _Item("no_date"), _Item("old_upload", uploaded_at=_ms(1995, 1, 1)),
+        _Item("recent_upload", uploaded_at=_ms(2024, 1, 1)),
+        _Item("dated", captured_at=_ms(2023, 1, 1)),
+    ]
+
+    result = playlist.filter_items(
+        items, mode=DATE_FILTER_CUSTOM, lookback_days=1825, missing_date=missing_date, now=_NOW,
+    )
+
+    assert [item.url for item in result] == expected
+
+
+def test_custom_lookback_does_not_override_presets():
+    items = [_Item("last_year", captured_at=_ms(2025, 1, 1))]
+    assert playlist.filter_items(items, mode=DATE_FILTER_LAST_7, lookback_days=1825, now=_NOW) == []
+    assert playlist.filter_items(items, mode=DATE_FILTER_OFF, lookback_days=1, now=_NOW) == items
+
+
+@pytest.mark.parametrize("invalid", [None, "many", True, float("inf")])
+def test_invalid_custom_lookback_uses_one_year(invalid):
+    items = [_Item("old", captured_at=_ms(2024, 1, 1)), _Item("new", captured_at=_ms(2026, 1, 1))]
+    result = playlist.filter_items(items, mode=DATE_FILTER_CUSTOM, lookback_days=invalid, now=_NOW)
+    assert [item.url for item in result] == ["new"]
 
 
 # -- filter_items: missing capture date -------------------------------------

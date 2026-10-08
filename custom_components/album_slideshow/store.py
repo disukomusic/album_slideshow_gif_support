@@ -13,6 +13,7 @@ from .const import (
     DEFAULT_FILL_MODE,
     DEFAULT_ORIENTATION_MISMATCH_MODE,
     DEFAULT_ORDER_MODE,
+    DEFAULT_SHUFFLE_AGE_BIAS,
     DEFAULT_ASPECT_RATIO,
     DEFAULT_PAIR_DIVIDER_PX,
     DEFAULT_PAIR_DIVIDER_COLOR,
@@ -21,6 +22,7 @@ from .const import (
     DEFAULT_NAVIGATION_BUFFER_SIZE,
     DEFAULT_MAX_RESOLUTION,
     DEFAULT_DATE_FILTER,
+    DEFAULT_CUSTOM_LOOKBACK_DAYS,
     DEFAULT_MISSING_DATE_MODE,
 )
 
@@ -35,6 +37,7 @@ class SlideshowStore:
     fill_mode: str = DEFAULT_FILL_MODE
     portrait_mode: str = DEFAULT_ORIENTATION_MISMATCH_MODE
     order_mode: str = DEFAULT_ORDER_MODE
+    shuffle_age_bias: int = DEFAULT_SHUFFLE_AGE_BIAS
     aspect_ratio: str = DEFAULT_ASPECT_RATIO
     pair_divider_px: int = DEFAULT_PAIR_DIVIDER_PX
     pair_divider_color: str = DEFAULT_PAIR_DIVIDER_COLOR
@@ -45,12 +48,16 @@ class SlideshowStore:
 
     # Date filter mode (preset windows like this_year / on_this_day).
     date_filter: str = DEFAULT_DATE_FILTER
+    custom_lookback_days: int = DEFAULT_CUSTOM_LOOKBACK_DAYS
 
     # How the date filter treats photos with no EXIF capture date.
     missing_date_mode: str = DEFAULT_MISSING_DATE_MODE
 
     # Pause toggle - when True, the slideshow holds on the current frame.
     paused: bool = False
+
+    # Draw face boxes, a centre crosshair and a crop summary on each slide.
+    face_debug: bool = False
 
     # In-memory last rendered frame. Not user-configurable; used to re-serve
     # the previous slide instantly across a camera reload.

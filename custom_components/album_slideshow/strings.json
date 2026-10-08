@@ -110,6 +110,23 @@
           "synology_image_size": "Image quality"
         }
       },
+      "ugreen": {
+        "title": "UGREEN NAS (UGOS Photos)",
+        "description": "Experimental: connect to the Photos app on a UGREEN NAS (UGOS Pro). Enter the NAS address including port (e.g. https://192.168.1.10:9443) and an account. This provider talks to an undocumented, reverse-engineered API and may break with future UGOS updates.",
+        "data": {
+          "ugreen_url": "NAS URL",
+          "ugreen_username": "Username",
+          "ugreen_password": "Password",
+          "ugreen_verify_ssl": "Verify SSL certificate"
+        }
+      },
+      "ugreen_select": {
+        "title": "UGREEN album",
+        "description": "Pick the UGOS Photos album to show.",
+        "data": {
+          "ugreen_album_uuid": "Album"
+        }
+      },
       "nextcloud": {
         "title": "Nextcloud",
         "description": "Choose how to connect: an authenticated WebDAV folder in your Nextcloud files, or a public Nextcloud Photos album share link.",
@@ -172,19 +189,57 @@
       "nextcloud_cannot_connect": "Could not connect to Nextcloud. Check the URL, username, app password and folder path.",
       "invalid_nextcloud_url": "That does not look like a Nextcloud Photos public album link.",
       "nextcloud_public_cannot_connect": "Could not connect to that Nextcloud album. Check the link is still valid.",
-      "invalid_ente_url": "That does not look like an Ente public album link. It should look like {example_url}, including the part after the #."
-      ,"ente_cannot_connect": "Could not open that Ente album. The link may be expired, revoked, or password-protected."
+      "invalid_ente_url": "That does not look like an Ente public album link. It should look like {example_url}, including the part after the #.",
+      "ente_cannot_connect": "Could not open that Ente album. The link may be expired, revoked, or password-protected.",
+      "ugreen_cannot_connect": "Could not connect to the UGREEN NAS. Check the URL, username and password. If the NAS uses a self-signed certificate, turn off Verify SSL certificate.",
+      "ugreen_no_albums": "No albums were found on this UGREEN NAS."
     }
   },
   "options": {
     "step": {
+      "google_metadata": {
+        "title": "Google Photos metadata and privacy",
+        "description": "Photo descriptions, camera details, and exposure metadata use Google's undocumented public endpoint without a Google login. Results are cached; unavailable metadata does not prevent the slideshow from loading.\n\nOriginal photo GPS is a separate opt-in, off by default. It reads up to 256 KB per photo. Google only includes GPS in shared originals when location sharing is turned on for the album; anyone with the album link can then see precise GPS. After changing the album's location sharing, turn this off and back on to rescan. Coordinates are cached in Home Assistant and exposed in camera attributes. Google-added or estimated locations are not included.\n\nPlace-name lookup is also off by default. It requires original GPS reading and sends coordinates to the public OpenStreetMap Nominatim service. Disabling original GPS hides coordinates and place names and stops both lookups; it does not erase previous history or backups.",
+        "data": {
+          "google_metadata": "Fetch photo metadata (experimental)",
+          "google_location": "Read original photo GPS (opt-in)",
+          "reverse_geocode": "Look up GPS place names via OpenStreetMap (opt-in)"
+        }
+      },
       "init": {
         "title": "Location & privacy options",
         "description": "Reverse geocoding sends your photos' EXIF GPS coordinates to the public OpenStreetMap Nominatim service to look up a human-readable place name. Coordinates are rounded to ~100 m before lookup and cached on disk. Turn this off to keep coordinates entirely local; the latitude and longitude attributes still work either way.",
         "data": {
           "reverse_geocode": "Reverse-geocode EXIF GPS coordinates via OpenStreetMap"
         }
+      },
+      "immich_select": {
+        "title": "Immich source",
+        "description": "Change which albums, people and favorites this slideshow shows. Saving reloads the slideshow; its entities, settings and hidden photos are kept.",
+        "data": {
+          "album_name": "Name",
+          "albums": "Albums",
+          "people": "People",
+          "favorites": "Include favorites",
+          "immich_filter": "Extra search filter (JSON, optional)",
+          "immich_image_size": "Image quality",
+          "reverse_geocode": "Look up EXIF GPS locations via OpenStreetMap"
+        }
+      },
+      "connection": {
+        "title": "Immich connection",
+        "description": "The stored Immich URL or API key no longer works. Update them to continue.",
+        "data": {
+          "immich_url": "Immich URL (e.g. http://192.168.1.10:2283)",
+          "immich_api_key": "API key"
+        }
       }
+    },
+    "error": {
+      "immich_cache_clear_failed": "Could not clear the previous photo source cache. No source settings were changed. Please try again.",
+      "immich_cannot_connect": "Could not connect to Immich. Check the URL and API key.",
+      "immich_invalid_auth": "Immich rejected the API key. Check that it is valid and that its permissions include server.about, album.read and person.read.",
+      "immich_filter_invalid": "The filter must be a valid JSON object. See the README for examples."
     }
   }
 }

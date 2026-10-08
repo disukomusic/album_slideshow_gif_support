@@ -3,6 +3,7 @@
 [Overview](../README.md) | [Provider Setup](provider-setup.md) | [Card Guide](card-guide.md)
 
 - [Runtime configuration](#runtime-configuration)
+- [Custom lookback and age bias](#custom-lookback-and-age-bias)
 - [Rendering options](#rendering-options)
 - [Pause and navigation](#pause-and-navigation)
 - [Entities created](#entities-created)
@@ -21,14 +22,50 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Pair minimum gap | 0 (off) | 0-50 (% of album) | Above 0, shuffles pairing candidates outside a circular index gap, capped to keep candidates available. Helps avoid nearby photos but does not detect photo sessions. At 0, keeps the original nearest-candidate search |
 | Number | Navigation buffer | 2 | 0-10 (slides) | Fully rendered slides cached before and after the current frame for immediate Previous/Next navigation |
 | Number | Image cache size | 75 | 50-1000 (MB) | Memory budget for downloaded image data (per album) |
+| Number | Custom lookback days | 365 | 1-36500 days | Rolling capture-date window, used only when Date filter is Custom days |
+| Number | Shuffle age bias | 0 | -100 to 100 | Negative favors older photos; positive favors newer photos; 0 preserves the original shuffle. Used only in Random order |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
 | Select | Order mode | random | random, album_order, newest_taken, oldest_taken, newest_added, oldest_added | Slide ordering behavior |
 | Select | Aspect ratio | 16:9 | 16:9, 4:3, 1:1, 9:16, and more | Canvas aspect ratio |
 | Select | Max resolution | 4K (2160p) | 480p, 720p, 1080p, 1440p, 4K (2160p), original | Cap output resolution by short edge; use original to render at native size |
-| Select | Date filter | off | off, last_7_days, last_30_days, last_365_days, this_month, this_year, on_this_day | Restrict the slideshow to a date window based on photo capture date |
+| Select | Date filter | off | off, last_7_days, last_30_days, last_365_days, custom_days, this_month, this_year, on_this_day | Restrict the slideshow to a date window based on photo capture date |
 | Text | Pair divider color | #FFFFFF | Hex, named colors, transparent | Divider color between paired images |
 | Switch | Pause slideshow | off | on / off | Hold the current frame; advances pause until turned off |
+| Switch | Crop debug overlay | off | on / off | Show detected face boxes, preferred padding, and the original photo center; see [crop diagnostics](provider-setup.md#crop-debug-overlay) |
+
+## Custom Lookback and Age Bias
+
+Set **Date filter** to **Custom days**, then set **Custom lookback days** to the
+number of days to retain. For example, 1825 keeps approximately five years.
+This is a rolling window, not a particular calendar year. Existing date presets
+and the missing-capture-date policy retain their behavior. Hidden photos remain
+excluded. Both new settings are also camera attributes; no metadata sensors are
+added.
+
+With **Order mode > Random**, **Shuffle age bias** controls the frequency of
+newly selected primary photos:
+
+- **0:** the original once-through random shuffle, unchanged.
+- **Positive:** favors newer photos; **negative:** favors older photos.
+- **100 / -100:** relative weights range from 1 to 10 across the eligible
+	playlist's oldest-to-newest capture dates. Intermediate values reduce the
+	preference linearly. This is not a percentage of displayed slides.
+- Photos without a usable date have weight 1. Upload dates are used as a
+	fallback only when **Missing capture date** is set to use them. If there
+	is no usable date range, the original shuffle is used.
+
+Nonzero bias uses weighted draws, so favored photos can return before every
+other photo has appeared. The current photo and a short recent-history window
+are excluded when possible. Tiny albums limit the achievable bias: two photos
+still alternate. Pairing keeps its existing orientation and minimum-gap rules;
+the age bias selects the primary photo, not its pairing partner. **Previous**
+and **Next** replay cached frames normally, without drawing a different random
+photo when going back and forward.
+
+These settings are shared by all cards using the same camera and survive
+restarts. The visual editor shows the lookback control only for **Custom days**
+and the bias control only for **Random**. Other ordering modes ignore the bias.
 
 ## Rendering Options
 
@@ -109,7 +146,7 @@ along with the [runtime controls](#runtime-configuration) above.
 | Media count | All | Number of images currently available |
 | Hidden photos | All | Number of persisted exclusions for this slideshow |
 | Image cache usage *(diagnostic)* | All | Current download cache size in MB |
-| Enrichment progress *(diagnostic)* | Local folder / Immich / Nextcloud / Ente | Percent of items whose metadata has been processed (EXIF/GPS for local folder and Nextcloud, per-asset detail for Immich, reverse-geocoding for Ente). Attributes include `phase`, `exif_done`/`exif_total`, `geocode_done`/`geocode_total`. |
+| Enrichment progress *(diagnostic)* | Local folder / Immich / Nextcloud / Ente / UGREEN / opted-in Google enrichment | Percent of items whose enabled metadata work has been processed. Google reuses this diagnostic sensor for camera metadata and optional GPS scans; UGREEN uses it for per-photo GPS lookups. Attributes include `phase`, `exif_done`/`exif_total`, `geocode_done`/`geocode_total`. |
 
 ## Camera Attributes
 
@@ -128,14 +165,24 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `captured_at_primary` | string \| null | Capture date of the primary image only |
 | `uploaded_at` | string \| null | ISO-8601 date when added to the album (Google Photos only) |
 | `byte_size` | int \| null | Original file size in bytes (Google Photos only) |
-| `latitude` | float \| null | GPS latitude in decimal degrees (local folder + Immich) |
-| `longitude` | float \| null | GPS longitude in decimal degrees (local folder + Immich) |
+| `latitude` | float \| null | GPS latitude when supplied by the provider; Google requires the separate original-GPS opt-in |
+| `longitude` | float \| null | GPS longitude when supplied by the provider; Google requires the separate original-GPS opt-in |
 | `location` | string \| null | Reverse-geocoded label (e.g. `"Lisbon, Portugal"`). Empty when reverse-geocoding is disabled or has not yet completed for this file. |
-| `description` | string \| null | Free-text photo caption. From EXIF `ImageDescription` / IPTC `Caption-Abstract` / XMP `dc:description` (local folder), or the Immich photo description (Immich provider). |
-| `caption_frames` | list | Structured per-image caption metadata: one entry for a normal slide, two (top/left first) for a pair. Each entry has `captured_at`, `location`, `latitude`, `longitude`, `description`. Used by the card's caption overlay. |
+| `description` | string \| null | Free-text photo caption when supplied by the source, including local EXIF/IPTC/XMP, direct Immich metadata, and optional experimental Google enrichment. |
+| `camera_make` / `camera_model` | string \| null | Camera brand and model, when experimental Google metadata is enabled and available |
+| `focal_length_mm` | number \| null | Focal length in millimeters from Google metadata |
+| `aperture_f_number` | number \| null | Aperture f-number from Google metadata |
+| `iso` | integer \| null | ISO sensitivity from Google metadata |
+| `exposure_time_seconds` | number \| null | Exposure duration in seconds from Google metadata |
+| `google_metadata_enabled` | bool | Whether optional Google photo metadata fetching is enabled for this slideshow |
+| `google_location_enabled` | bool | Whether the separate original-photo GPS opt-in is enabled; defaults to false |
+| `google_reverse_geocode_enabled` | bool | Whether both Google GPS reading and external place-name lookup are enabled; defaults to false |
+| `caption_frames` | list | Structured per-image metadata: one entry for a normal slide, two (top/left first) for a pair. Each entry has `captured_at`, `location`, `latitude`, `longitude`, `description`, and the camera/exposure fields above. The card can display these in captions. |
 | `pair_orientation` | string \| null | How a paired slide is split: `horizontal` (left/right) or `vertical` (top/bottom). `null` for single slides. |
 | `paused` | bool | Whether the slideshow is paused |
 | `date_filter` | string | Active date filter mode |
+| `custom_lookback_days` | integer | Number of days used by the custom date filter |
+| `shuffle_age_bias` | integer | Signed age preference in Random order; 0 means the original neutral shuffle |
 | `frame_id` | int | Monotonic counter incremented on every committed slide. Used by the [card](card-guide.md) to detect new frames |
 | `entry_id` | string | Config entry ID for slideshow actions |
 | `displayed_photo_ids` | list | Opaque IDs for the rendered photo(s), first = left/top. An unavailable ID is `null`; an empty list means no ready photo |

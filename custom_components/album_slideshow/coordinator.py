@@ -6,11 +6,13 @@ from datetime import timedelta
 from hashlib import sha256
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
 from typing import Any
 
+import aiohttp
 import async_timeout
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -22,6 +24,12 @@ from .const import (
     PUBLICALBUM_ENDPOINT,
     CONF_PROVIDER,
     CONF_ALBUM_URL,
+    CONF_GOOGLE_METADATA,
+    DEFAULT_GOOGLE_METADATA,
+    CONF_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_LOCATION,
+    DEFAULT_GOOGLE_REVERSE_GEOCODE,
+    CAMERA_METADATA_FIELDS,
     CONF_LOCAL_PATH,
     CONF_MEDIA_CONTENT_ID,
     CONF_RECURSIVE,
@@ -81,6 +89,12 @@ from .const import (
     CONF_ENTE_IMAGE_SIZE,
     DEFAULT_ENTE_IMAGE_SIZE,
     ENTE_IMAGE_PREVIEW,
+    CONF_UGREEN_URL,
+    CONF_UGREEN_USERNAME,
+    CONF_UGREEN_PASSWORD,
+    CONF_UGREEN_ALBUM_UUID,
+    CONF_UGREEN_ALBUM_TYPE,
+    CONF_UGREEN_VERIFY_SSL,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     ENRICHING_PROVIDERS,
@@ -93,10 +107,12 @@ from .const import (
     PROVIDER_SYNOLOGY,
     PROVIDER_NEXTCLOUD,
     PROVIDER_ENTE,
+    PROVIDER_UGREEN,
 )
 from .store import SlideshowStore
 
 _LOGGER = logging.getLogger(__name__)
+_GOOGLE_METADATA_INTERVAL = 1.0
 
 
 @dataclass
@@ -127,12 +143,11 @@ class MediaItem:
     # Provider-specific source identifier (e.g. the Immich asset id) used by
     # background enrichment to fetch per-item metadata.
     source_id: str | None = None
-    # Normalised point (0..1 in displayed-image coordinates) that cover-mode
-    # cropping should keep visible. Immich person sources populate this from
-    # the selected person's face bounding box; other sources leave it unset
-    # and retain the traditional centred crop.
-    focus_x: float | None = None
-    focus_y: float | None = None
+    # Detected faces as normalised [x1, y1, x2, y2, weight, selected] boxes (0..1 in
+    # displayed-image coordinates). Cover-mode cropping keeps as many whole
+    # faces as fit. None means no face data (non-Immich source, not scanned
+    # yet or the face lookup failed); an empty list means "no faces".
+    faces: list[list[float | bool]] | None = None
     # True once the local-folder EXIF reader has visited this file.
     # Prevents re-reading EXIF on every coordinator refresh and lets the
     # background enrichment task skip already-processed files even after
@@ -140,6 +155,8 @@ class MediaItem:
     exif_scanned: bool = False
     photo_id: str | None = None
     face_scanned: bool = False
+    camera_metadata: dict[str, Any] | None = None
+    google_location_scanned: bool = False
 
     def __post_init__(self) -> None:
         if self.photo_id is None:
@@ -318,11 +335,11 @@ def _pick_timestamp_ms(d: dict[str, Any], *path: str) -> int | None:
         if not isinstance(cur, dict):
             return None
         cur = cur.get(p)
-    if cur is None:
+    if cur is None or isinstance(cur, bool):
         return None
     if isinstance(cur, int):
-        # Heuristic: < 1e12 means seconds, otherwise milliseconds.
-        return cur * 1000 if cur < 10**12 else cur
+        # Infer seconds only within the plausible 1800-2100 date range.
+        return cur * 1000 if -5_364_662_400 <= cur <= 4_102_444_800 else cur
     if isinstance(cur, str):
         try:
             iso = cur.replace("Z", "+00:00")
@@ -458,6 +475,7 @@ _EXIF_GPS_LAT_REF = 1                     # "N" / "S"
 _EXIF_GPS_LAT = 2                         # rational tuple
 _EXIF_GPS_LON_REF = 3                     # "E" / "W"
 _EXIF_GPS_LON = 4                         # rational tuple
+_HEIF_EXIF_RE = re.compile(rb"Exif\x00\x00(?:MM\x00\x2a|II\x2a\x00)")
 
 # Nominatim (OpenStreetMap) is free but rate-limited to 1 request/second
 # per IP and asks integrators to identify themselves with a descriptive
@@ -784,7 +802,7 @@ def _read_exif_from_image(img: Any, out: dict[str, Any]) -> None:
 
 
 def _read_exif_from_bytes(
-    data: bytes, mtime_fallback_ms: int | None
+    data: bytes, mtime_fallback_ms: int | None, *, strict: bool = False,
 ) -> dict[str, Any]:
     """Read EXIF metadata from already-downloaded image bytes.
 
@@ -809,9 +827,59 @@ def _read_exif_from_bytes(
         with Image.open(io.BytesIO(data)) as img:
             _read_exif_from_image(img, out)
     except Exception as err:
+        if strict:
+            raise
         _LOGGER.debug("EXIF: failed to read image bytes: %s", err)
 
     return out
+
+
+def _read_gps_from_header(data: bytes) -> dict[str, float]:
+    """Read GPS from an original-image prefix; raise ``ValueError`` if it is too short to tell."""
+    if data[:2] == b"\xff\xd8":
+        payload = _jpeg_exif_segment(data)
+    elif data[4:8] == b"ftyp":
+        match = _HEIF_EXIF_RE.search(data)
+        if match is None:
+            raise ValueError("HEIF EXIF not found in header")
+        payload = data[match.start():]
+    else:
+        metadata = _read_exif_from_bytes(data, None, strict=True)
+        return {key: metadata[key] for key in ("latitude", "longitude") if key in metadata}
+    if payload is None:
+        return {}
+
+    from PIL import Image
+
+    try:
+        exif = Image.Exif()
+        exif.load(payload)
+        gps = exif.get_ifd(_EXIF_TAG_GPS_IFD)
+    except Exception:
+        return {}
+    lat = _gps_to_decimal(gps.get(_EXIF_GPS_LAT), gps.get(_EXIF_GPS_LAT_REF))
+    lon = _gps_to_decimal(gps.get(_EXIF_GPS_LON), gps.get(_EXIF_GPS_LON_REF))
+    return {} if lat is None or lon is None else {"latitude": lat, "longitude": lon}
+
+
+def _jpeg_exif_segment(data: bytes) -> bytes | None:
+    pos = 2
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            return None
+        marker = data[pos + 1]
+        if marker == 0xFF:
+            pos += 1
+            continue
+        if marker in (0xD9, 0xDA):
+            return None
+        end = pos + 2 + int.from_bytes(data[pos + 2:pos + 4], "big")
+        if marker == 0xE1 and data[pos + 4:pos + 10] == b"Exif\x00\x00":
+            if end > len(data):
+                raise ValueError("JPEG EXIF segment is truncated")
+            return data[pos + 4:end]
+        pos = end
+    raise ValueError("JPEG header ends before image data")
 
 
 def _format_nominatim_location(payload: dict[str, Any]) -> str | None:
@@ -995,13 +1063,11 @@ def _merge_prior_enrichment(
             item.location = prev.location
         if prev.description and not item.description:
             item.description = prev.description
-        if prev.focus_x is not None and item.focus_x is None:
-            item.focus_x = prev.focus_x
-        if prev.focus_y is not None and item.focus_y is None:
-            item.focus_y = prev.focus_y
+        if prev.faces is not None and item.faces is None:
+            item.faces = prev.faces
         if prev.exif_scanned:
             item.exif_scanned = True
-        if prev.face_scanned:
+        if prev.face_scanned and prev.faces is not None:
             item.face_scanned = True
 
 
@@ -1021,6 +1087,13 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self.store = store
 
         self.provider: str = entry.data.get(CONF_PROVIDER, PROVIDER_GOOGLE_SHARED)
+        self._immich_cache_source = None
+        if self.provider == PROVIDER_IMMICH:
+            source = [entry.data.get(key) for key in (
+                CONF_IMMICH_URL, CONF_IMMICH_API_KEY, CONF_IMMICH_SELECTION_TYPE,
+                CONF_IMMICH_SELECTION_ID, CONF_IMMICH_FILTER, CONF_IMMICH_IMAGE_SIZE,
+            )]
+            self._immich_cache_source = sha256(json.dumps(source).encode()).hexdigest()
         self.album_url: str | None = entry.data.get(CONF_ALBUM_URL)
         self.local_path: str | None = entry.data.get(CONF_LOCAL_PATH)
         self.recursive: bool = bool(entry.data.get(CONF_RECURSIVE, True))
@@ -1028,9 +1101,20 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Extra headers the camera must send when fetching image bytes
         # (Immich API key). Empty for providers that need no auth.
         self.image_request_headers: dict[str, str] = {}
+        # Query params added only at fetch time (UGREEN ``ugk``), so stored
+        # URLs, attributes and logs never carry them.
+        self.image_request_params: dict[str, str] = {}
+        # False when the entry opted out of TLS certificate checks (UGREEN NAS
+        # with a self-signed certificate).
+        self.image_request_verify_ssl: bool = True
         # Ente only: file id -> {key, header, thumbnail}, the material needed
         # to decrypt each image. Rebuilt on every album refresh.
         self._ente_fetch_meta: dict[str, dict[str, Any]] = {}
+        # UGREEN only: logged-in client + selected album, reused by the
+        # background enrichment pass instead of logging in again per photo.
+        self._ugreen_client: Any = None
+        self._ugreen_album_uuid: str | None = None
+        self._ugreen_album_type: int = 1
 
         # Persist the most recent successful album fetch so that a transient
         # network/Google failure doesn't blank the slideshow on restart.
@@ -1106,6 +1190,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_nextcloud()
             elif self.provider == PROVIDER_ENTE:
                 data = await self._update_ente()
+            elif self.provider == PROVIDER_UGREEN:
+                data = await self._update_ugreen()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -1119,7 +1205,29 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise
 
         items = data.get("items") or []
-        if self.provider in ENRICHING_PROVIDERS and items:
+        self._apply_google_location_privacy(items)
+        if (self.google_metadata_enabled or self.google_location_enabled) and items:
+            prior = (self.data or {}).get("items", []) if isinstance(self.data, dict) else []
+            if not self._items_cache_loaded:
+                cached = await self._load_cached_items()
+                prior = (cached or {}).get("items", []) + prior
+                self._items_cache_loaded = True
+            by_id = {item.source_id: item for item in prior if item.source_id}
+            for item in items:
+                previous = by_id.get(item.source_id)
+                if previous is None:
+                    continue
+                if self.google_metadata_enabled and isinstance(previous.camera_metadata, dict):
+                    item.camera_metadata = dict(previous.camera_metadata)
+                    item.description = previous.description
+                if self.google_location_enabled and previous.google_location_scanned:
+                    item.latitude = previous.latitude
+                    item.longitude = previous.longitude
+                    item.location = previous.location
+                    item.google_location_scanned = True
+            self._apply_google_location_privacy(items)
+            self._schedule_enrichment(data)
+        elif self.provider in ENRICHING_PROVIDERS and items:
             # Carry forward EXIF/geocode metadata for items we've already
             # scanned this session; new items get filled in by the
             # background worker below.
@@ -1157,17 +1265,47 @@ class AlbumCoordinator(DataUpdateCoordinator):
         finally:
             self._enrichment_task = None
 
+    @property
+    def google_metadata_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.provider == PROVIDER_GOOGLE_SHARED and bool(
+            options.get(CONF_GOOGLE_METADATA, DEFAULT_GOOGLE_METADATA)
+        )
+
+    @property
+    def google_location_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.provider == PROVIDER_GOOGLE_SHARED and bool(
+            options.get(CONF_GOOGLE_LOCATION, DEFAULT_GOOGLE_LOCATION)
+        )
+
+    @property
+    def google_reverse_geocode_enabled(self) -> bool:
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.google_location_enabled and bool(
+            options.get(CONF_REVERSE_GEOCODE, DEFAULT_GOOGLE_REVERSE_GEOCODE)
+        )
+
+    def _apply_google_location_privacy(self, items: list[MediaItem]) -> None:
+        if getattr(self, "provider", None) != PROVIDER_GOOGLE_SHARED:
+            return
+        for item in items:
+            if not self.google_location_enabled:
+                item.latitude = None
+                item.longitude = None
+                item.location = None
+                item.google_location_scanned = False
+            elif not self.google_reverse_geocode_enabled:
+                item.location = None
+
     def _needs_enrichment(self, item: MediaItem) -> bool:
+        if self.provider == PROVIDER_GOOGLE_SHARED:
+            return (
+                self.google_metadata_enabled and bool(item.source_id) and item.camera_metadata is None
+            ) or (self.google_location_enabled and not item.google_location_scanned)
         if not item.exif_scanned:
             return True
-        if self.provider != PROVIDER_IMMICH or item.face_scanned:
-            return False
-        from . import immich as immich_api
-
-        return bool(immich_api.selected_person_ids(
-            self.entry.data.get(CONF_IMMICH_SELECTION_TYPE),
-            self.entry.data.get(CONF_IMMICH_SELECTION_ID),
-        ))
+        return self.provider == PROVIDER_IMMICH and not item.face_scanned
 
     def _schedule_enrichment(self, data: dict[str, Any]) -> None:
         """Kick off the background EXIF + geocode worker if there's work."""
@@ -1175,7 +1313,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         unscanned = [it for it in items if self._needs_enrichment(it)]
         # Providers that decrypt/return GPS inline (Ente) have nothing to scan
         # but still need the coordinates turned into a place label.
-        needs_geocode = any(
+        needs_geocode = (
+            self.provider != PROVIDER_GOOGLE_SHARED or self.google_reverse_geocode_enabled
+        ) and any(
             it.latitude is not None and it.longitude is not None and not it.location
             for it in items
         )
@@ -1199,7 +1339,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "geocode_done": 0,
         }
         self._enrichment_task = self.hass.async_create_background_task(
-            self._enrich_items_background(data),
+            self._enrich_google_items_background(data) if self.provider == PROVIDER_GOOGLE_SHARED
+            else self._enrich_items_background(data),
             name=f"album_slideshow_enrich_{self.entry.entry_id}",
         )
 
@@ -1210,6 +1351,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Album cache: failed to load (%s)", err)
             return None
         if not isinstance(payload, dict):
+            return None
+
+        cached_source = payload.get("immich_source")
+        if cached_source is not None and cached_source != getattr(self, "_immich_cache_source", None):
             return None
 
         raw_items = payload.get("items")
@@ -1235,15 +1380,21 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     location=raw.get("location"),
                     description=raw.get("description"),
                     source_id=raw.get("source_id"),
-                    focus_x=raw.get("focus_x"),
-                    focus_y=raw.get("focus_y"),
+                    faces=raw.get("faces"),
                     exif_scanned=bool(raw.get("exif_scanned", False)),
                     photo_id=raw.get("photo_id"),
-                    face_scanned=bool(raw.get("face_scanned", False)),
+                    face_scanned=bool(raw.get("face_scanned", False))
+                    and isinstance(raw.get("faces"), list),
+                    camera_metadata={
+                        key: value for key, value in raw["camera_metadata"].items()
+                        if key in CAMERA_METADATA_FIELDS
+                    } if isinstance(raw.get("camera_metadata"), dict) else None,
+                    google_location_scanned=bool(raw.get("google_location_scanned", False)),
                 ))
             except Exception:
                 continue
 
+        self._apply_google_location_privacy(items)
         return {
             "title": payload.get("title"),
             "items": items,
@@ -1251,6 +1402,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
     async def _save_cached_items(self, data: dict[str, Any]) -> None:
         items = data.get("items") or []
+        self._apply_google_location_privacy(items)
         # Local-folder URLs are absolute paths on the host; persisting them
         # is fine but they don't survive a host reformat. Persist anyway,
         # the URL check at load time will skip any stale entries.
@@ -1271,15 +1423,18 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "location": it.location,
                     "description": it.description,
                     "source_id": it.source_id,
-                    "focus_x": it.focus_x,
-                    "focus_y": it.focus_y,
+                    "faces": it.faces,
                     "exif_scanned": it.exif_scanned,
                     "photo_id": it.photo_id,
                     "face_scanned": it.face_scanned,
+                    "camera_metadata": it.camera_metadata,
+                    "google_location_scanned": it.google_location_scanned,
                 }
                 for it in items
             ],
         }
+        if source := getattr(self, "_immich_cache_source", None):
+            payload["immich_source"] = source
         try:
             await self._items_cache_store.async_save(payload)
         except Exception as err:  # pragma: no cover - storage layer
@@ -1858,6 +2013,102 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "items": items,
         }
 
+    async def _update_ugreen(self) -> dict[str, Any]:
+        """Fetch photos from a UGREEN NAS UGOS Photos album.
+
+        Logs in fresh on every refresh, like the Synology provider. The
+        album is addressed by its stored uuid, so renaming it in UGOS Photos
+        needs no reconfiguration.
+        """
+        from . import ugreen as ugr_api
+
+        url = self.entry.data.get(CONF_UGREEN_URL)
+        username = self.entry.data.get(CONF_UGREEN_USERNAME)
+        password = self.entry.data.get(CONF_UGREEN_PASSWORD)
+        album_uuid = self.entry.data.get(CONF_UGREEN_ALBUM_UUID)
+        album_type = self.entry.data.get(
+            CONF_UGREEN_ALBUM_TYPE, ugr_api.ALBUM_TYPE_REGULAR
+        )
+        verify_ssl = bool(self.entry.data.get(CONF_UGREEN_VERIFY_SSL, True))
+        if not url or not username or not password or not album_uuid:
+            raise UpdateFailed("UGREEN provider is missing URL, credentials or album")
+
+        client = ugr_api.UGreenClient(
+            self.hass, url, username, password, verify_ssl=verify_ssl
+        )
+        try:
+            await client.async_login()
+            photos = await client.async_list_album_pictures(album_uuid, album_type)
+        except ugr_api.UGreenAuthError as err:
+            raise UpdateFailed(f"UGREEN login failed: {err}") from err
+        except ugr_api.UGreenApiError as err:
+            raise UpdateFailed(f"Error listing UGREEN album photos: {err}") from err
+
+        if not photos:
+            raise UpdateFailed(f"No images found in UGREEN album '{self.entry.title}'")
+
+        # Stored so the camera can fetch image bytes server-side (session
+        # cookie plus ``ugk``, added per request so stored URLs never carry it)
+        # with the same TLS setting as the login.
+        self.image_request_headers = dict(client.image_headers)
+        self.image_request_params = dict(client.image_params)
+        self.image_request_verify_ssl = verify_ssl
+        # Kept for the background enrichment pass (GPS/address lookups),
+        # which needs a logged-in client and the album context per photo.
+        self._ugreen_client = client
+        self._ugreen_album_uuid = album_uuid
+        self._ugreen_album_type = album_type
+
+        items: list[MediaItem] = []
+        for p in photos:
+            picture_id = p.get("picture_id")
+            if picture_id is None:
+                continue
+            # Backstop for type_option; a video would only show its poster frame.
+            ext = p.get("real_ext_name") or Path(str(p.get("file_name") or "")).suffix
+            if f".{str(ext).lstrip('.').lower()}" in _VIDEO_EXTS:
+                continue
+            meta = ugr_api.parse_photo_meta(p)
+            items.append(
+                MediaItem(
+                    url=ugr_api.build_image_url(
+                        client.base_url,
+                        picture_id,
+                        album_uuid,
+                        source_album_type=album_type,
+                        upload_time=p.get("upload_time", 0),
+                    ),
+                    width=meta.get("width"),
+                    height=meta.get("height"),
+                    mime_type=None,
+                    filename=p.get("file_name"),
+                    captured_at=meta.get("captured_at"),
+                    byte_size=meta.get("byte_size"),
+                    latitude=None,
+                    longitude=None,
+                    location=None,
+                    description=None,
+                    source_id=str(picture_id),
+                    # GPS/address isn't in this listing - the background
+                    # enrichment pass fills it in via picture/info.
+                    exif_scanned=False,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any UGREEN images")
+
+        try:
+            album_name = await client.async_get_album_name(album_uuid)
+        except Exception as err:  # noqa: BLE001 - the title is cosmetic
+            _LOGGER.debug("UGREEN: could not read the album name: %s", err)
+            album_name = None
+
+        return {
+            "title": album_name or self.entry.title,
+            "items": items,
+        }
+
     async def _update_nextcloud(self) -> dict[str, Any]:
         """List photos from Nextcloud, dispatching on the configured auth mode."""
         mode = self.entry.data.get(
@@ -2199,7 +2450,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         return None, {}
 
     async def _enrich_immich_item(self, item: MediaItem) -> None:
-        """Fetch Immich metadata and selected-person face crop focus."""
+        """Fetch Immich metadata and the face boxes used for cropping."""
         from . import immich as immich_api
 
         url = self.entry.data.get(CONF_IMMICH_URL)
@@ -2214,7 +2465,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         )
 
         requests = {}
-        needs_faces = bool(person_ids) and not item.face_scanned
+        needs_faces = not item.face_scanned
         if not item.exif_scanned or needs_faces:
             requests["asset"] = client.async_get_asset(item.source_id)
         if needs_faces:
@@ -2263,15 +2514,143 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         _LOGGER.debug("Immich: edit metadata unavailable for asset %s", item.source_id)
                         continue
                 try:
-                    focus = immich_api.parse_face_focus(
+                    boxes = immich_api.parse_face_boxes(
                         result, person_ids, edits=edits,
                         original_size=immich_api.original_image_size(asset),
                     )
                 except (TypeError, ValueError):
                     _LOGGER.debug("Immich: unsupported face geometry for asset %s", item.source_id)
                     continue
-                item.focus_x, item.focus_y = focus if focus is not None else (None, None)
+                item.faces = boxes
                 item.face_scanned = True
+
+    async def _enrich_google_items_background(self, data: dict[str, Any]) -> None:
+        """Cache optional Google metadata without delaying or failing the playlist."""
+        from . import google_scraper
+
+        jobs = []
+        for item in data.get("items", []):
+            if self.google_metadata_enabled and item.source_id and item.camera_metadata is None:
+                jobs.append((item, False))
+            if self.google_location_enabled and not item.google_location_scanned:
+                jobs.append((item, True))
+        if not jobs:
+            try:
+                if self.google_reverse_geocode_enabled:
+                    await self._geocode_items_background(data)
+            finally:
+                self._enrich_progress["phase"] = "done"
+            return
+        failures = 0
+        completed = 0
+        next_request = 0.0
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession(
+                cookie_jar=aiohttp.DummyCookieJar(), trust_env=False,
+            ) as session:
+                keys = None
+                for item, location_job in jobs:
+                    delay = next_request - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    try:
+                        if location_job:
+                            header = await google_scraper.fetch_photo_location_header(session, item.url)
+                            try:
+                                metadata = await self.hass.async_add_executor_job(
+                                    _read_gps_from_header, header,
+                                )
+                            except Exception as err:
+                                # A photo that cannot be parsed must not stop the scan for the rest.
+                                _LOGGER.debug("Google photo GPS unreadable (%s)", type(err).__name__)
+                                continue
+                            latitude = metadata.get("latitude")
+                            longitude = metadata.get("longitude")
+                            if (
+                                all(type(value) in (int, float) and math.isfinite(value)
+                                    for value in (latitude, longitude))
+                                and -90 <= latitude <= 90 and -180 <= longitude <= 180
+                                and (abs(latitude) > 1e-6 or abs(longitude) > 1e-6)
+                            ):
+                                item.latitude, item.longitude = latitude, longitude
+                            else:
+                                item.latitude = item.longitude = None
+                            item.location = None
+                            item.google_location_scanned = True
+                        else:
+                            if keys is None:
+                                keys = await google_scraper.fetch_metadata_keys(session, self.album_url)
+                            metadata = await google_scraper.fetch_photo_metadata(
+                                session, keys, item.source_id,
+                            )
+                            item.description = metadata.pop("description", None)
+                            item.camera_metadata = metadata
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:
+                        failures += 1
+                        _LOGGER.debug(
+                            "Google photo metadata unavailable (%s, status=%s)",
+                            type(err).__name__, getattr(err, "status", None),
+                        )
+                        if failures >= 3 or getattr(err, "status", None) in (401, 403, 429):
+                            break
+                    else:
+                        failures = 0
+                        completed += 1
+                        if not self._needs_enrichment(item):
+                            self._enrich_progress["exif_done"] += 1
+                        if completed == 1 or completed % 10 == 0:
+                            await self._save_cached_items(data)
+                            self.async_set_updated_data(data)
+                    finally:
+                        next_request = loop.time() + _GOOGLE_METADATA_INTERVAL
+            if self.google_reverse_geocode_enabled:
+                await self._geocode_items_background(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.debug("Google photo enrichment stopped (%s)", type(err).__name__)
+        finally:
+            self._enrich_progress["phase"] = "done"
+            await self._save_cached_items(data)
+            if completed:
+                self.async_set_updated_data(data)
+
+    async def _enrich_ugreen_item(self, item: MediaItem) -> None:
+        """Fetch GPS coordinates and a location label for one UGREEN photo.
+
+        Reuses the client stashed by ``_update_ugreen`` instead of logging in
+        again per photo. Image URLs are stable across refreshes, so
+        ``_merge_prior_enrichment`` carries results forward and only new
+        photos are looked up.
+        """
+        from . import ugreen as ugr_api
+
+        client = self._ugreen_client
+        if client is None or not item.source_id or not self._ugreen_album_uuid:
+            item.exif_scanned = True
+            return
+        try:
+            info = await client.async_get_picture_info(
+                item.source_id, self._ugreen_album_uuid, self._ugreen_album_type
+            )
+        except asyncio.CancelledError:
+            raise
+        except ugr_api.UGreenApiError as err:
+            _LOGGER.debug(
+                "UGREEN: picture/info failed for %s: %s", item.source_id, err
+            )
+            item.exif_scanned = True
+            return
+        meta = ugr_api.parse_picture_location(info)
+        if "latitude" in meta and "longitude" in meta:
+            item.latitude = meta["latitude"]
+            item.longitude = meta["longitude"]
+        if "location" in meta:
+            item.location = meta["location"]
+        item.exif_scanned = True
 
     async def _enrich_items_background(self, data: dict[str, Any]) -> None:
         """Read EXIF for unscanned local files, then reverse-geocode.
@@ -2324,6 +2703,24 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         raise
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.debug("Nextcloud enrich error: %s", err)
+                        item.exif_scanned = True
+                    scanned_since_save += 1
+                    self._enrich_progress["exif_done"] = (
+                        self._enrich_progress.get("exif_done", 0) + 1
+                    )
+                    if scanned_since_save >= _EXIF_BATCH_SAVE:
+                        scanned_since_save = 0
+                        await self._save_cached_items(data)
+                        self.async_set_updated_data(data)
+                    continue
+
+                if self.provider == PROVIDER_UGREEN:
+                    try:
+                        await self._enrich_ugreen_item(item)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.debug("UGREEN enrich error: %s", err)
                         item.exif_scanned = True
                     scanned_since_save += 1
                     self._enrich_progress["exif_done"] = (
@@ -2396,6 +2793,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         the GPS coordinates themselves. Successful labels are written
         back into the items in-place and persisted via the items cache.
         """
+        if getattr(self, "provider", None) == PROVIDER_GOOGLE_SHARED and not self.google_reverse_geocode_enabled:
+            return
         if not bool(
             self.entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE)
             if hasattr(self.entry, "options") and self.entry.options is not None

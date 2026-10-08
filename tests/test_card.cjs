@@ -700,3 +700,692 @@ test("the editor offers and serializes on-demand controls", () => {
   editor._valueChanged({ stopPropagation() {}, detail: { value: { ...editor._data(), photo_controls: "off" } } });
   assert.equal(saved.photo_controls, undefined);
 });
+
+test("camera and exposure caption fields normalize without changing defaults", () => {
+  const card = Object.create(Card.prototype);
+  assert.equal(JSON.stringify(card._normalizeCaption(true).show), '["date","location"]');
+  const normalized = card._normalizeCaption({ show: "date,camera,ISO,exposure_time_seconds,unknown,camera" });
+  assert.equal(JSON.stringify(normalized.show), '["date","camera","iso","exposure_time_seconds"]');
+});
+
+test("captions format camera details and standard exposure values", () => {
+  const card = Object.create(Card.prototype);
+  card._hass = { locale: { language: "en" } };
+  const frame = {
+    description: "A photo", camera_make: "Google", camera_model: "Pixel 11 Pro Fold",
+    focal_length_mm: 5.28, aperture_f_number: 1.7, iso: 116, exposure_time_seconds: 0.008,
+  };
+  const caption = { show: ["description", "camera", "focal_length_mm", "aperture_f_number", "iso", "exposure_time_seconds"] };
+  assert.equal(JSON.stringify(card._captionLines(frame, caption)),
+    '["A photo","Google Pixel 11 Pro Fold","5.28 mm","f/1.7","ISO 116","1/125 s"]');
+  assert.equal(JSON.stringify(card._captionLines({ camera_make: "Canon", camera_model: "Canon EOS R5" }, { show: ["camera"] })), '["Canon EOS R5"]');
+  assert.equal(JSON.stringify(card._captionLines({ exposure_time_seconds: 2.5 }, { show: ["exposure_time_seconds"] })), '["2.5 s"]');
+});
+
+test("captions omit unavailable and invalid camera fields", () => {
+  const card = Object.create(Card.prototype);
+  const caption = { show: ["camera", "camera_model", "iso", "focal_length_mm", "aperture_f_number", "exposure_time_seconds"] };
+  for (const value of [null, undefined, NaN, Infinity, -1, 0, true, "100"]) {
+    assert.equal(JSON.stringify(card._captionLines({ camera_model: " ", iso: value, focal_length_mm: value, aperture_f_number: value, exposure_time_seconds: value }, caption)), '[]');
+  }
+});
+
+test("paired captions use each photo's metadata instead of primary values", () => {
+  const card = Object.create(Card.prototype);
+  const data = { camera_model: "Wrong fallback", iso: 999, caption_frames: [
+    { camera_model: "First camera", iso: 20 }, { camera_model: "Second camera", iso: 200 },
+  ] };
+  const frames = card._buildCaptionFrames(data);
+  const config = { show: ["camera_model", "iso"] };
+  assert.equal(JSON.stringify(card._captionLines(frames[0], config)), '["First camera","ISO 20"]');
+  assert.equal(JSON.stringify(card._captionLines(frames[1], config)), '["Second camera","ISO 200"]');
+  const legacy = card._buildCaptionFrames({ camera_make: "Apple", camera_model: "iPhone", iso: 100 });
+  assert.equal(JSON.stringify(card._captionLines(legacy[0], { show: ["camera", "iso"] })), '["Apple iPhone","ISO 100"]');
+});
+
+test("caption snapshot includes exposure metadata for legacy flat cameras", () => {
+  const fixture = navigationCardFixture();
+  const { card, attrs } = fixture;
+  card._config.caption = card._normalizeCaption({ show: ["camera", "iso"] });
+  card._controlsReveal.holding = false;
+  card._holdSwapsUntil = 0;
+  card._lastFrameId = null;
+  Object.assign(attrs, { camera_make: "Apple", camera_model: "iPhone", iso: 20 });
+  let captured;
+  card._loadAndSwap = (_url, _fit, _blur, data) => { captured = data; };
+  card._maybeSwap();
+  assert.equal(captured.camera_model, "iPhone");
+  assert.equal(captured.iso, 20);
+});
+
+test("editor round-trips new caption fields and offers metadata choices", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  const show = ["date", "camera", "iso", "aperture_f_number", "exposure_time_seconds"];
+  editor.setConfig({ entity: "camera.test", caption: { show } });
+  const schema = editor._captionSchema();
+  const choices = schema.find(field => field.name === "caption_show").selector.select.options;
+  assert.ok(show.every(field => choices.some(option => option.value === field)));
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._valueChanged({ stopPropagation() {}, detail: { value: editor._data() } });
+  assert.equal(JSON.stringify(saved.caption.show), JSON.stringify(show));
+});
+
+test("lookback and age bias controls only show for the applicable modes", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor._siblings = {
+    date_filter: "select.dates", order_mode: "select.order",
+    custom_lookback_days: "number.days", shuffle_age_bias: "number.bias",
+  };
+  editor._hass = { states: {
+    "select.dates": { state: "custom_days", attributes: { options: ["off", "custom_days"] } },
+    "select.order": { state: "random", attributes: { options: ["random", "newest_taken"] } },
+    "number.days": { state: "1825", attributes: { min: 1, max: 36500, step: 1 } },
+    "number.bias": { state: "-50", attributes: { min: -100, max: 100, step: 1 } },
+  } };
+  const fields = editor._liveSchema();
+  assert.equal(fields.find(field => field.name === "live_shuffle_age_bias").selector.number.mode, "slider");
+  assert.ok(fields.some(field => field.name === "live_custom_lookback_days"));
+  assert.equal(editor._liveDataFromStates().live_custom_lookback_days, 1825);
+  assert.equal(editor._liveDataFromStates().live_shuffle_age_bias, -50);
+  editor._hass.states["select.dates"].state = "off";
+  editor._hass.states["select.order"].state = "newest_taken";
+  assert.ok(!editor._liveSchema().some(field => ["live_custom_lookback_days", "live_shuffle_age_bias"].includes(field.name)));
+});
+
+test("playlist controls call number services without writing them into card config", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor._siblings = { custom_lookback_days: "number.renamed_days", shuffle_age_bias: "number.renamed_bias" };
+  editor._liveData = { live_custom_lookback_days: 365, live_shuffle_age_bias: 0 };
+  const calls = [];
+  editor._hass = { callService: (...args) => calls.push(args) };
+  editor.dispatchEvent = () => { throw new Error("Live setting leaked into card YAML"); };
+  editor._valueChanged({ stopPropagation() {}, detail: { value: { live_custom_lookback_days: 1825 } } });
+  editor._valueChanged({ stopPropagation() {}, detail: { value: { live_shuffle_age_bias: 60 } } });
+  assert.equal(JSON.stringify(calls), JSON.stringify([
+    ["number", "set_value", { entity_id: "number.renamed_days", value: 1825 }],
+    ["number", "set_value", { entity_id: "number.renamed_bias", value: 60 }],
+  ]));
+});
+
+test("caption fitting shrinks overflowing text and restores the chosen size when space returns", () => {
+  const card = Object.create(Card.prototype);
+  card._config = { caption: { font_size: "20px" } };
+  let availableHeight = 100;
+  const box = {
+    style: {}, _captionFontSize: "20px",
+  };
+  const stack = {
+    clientWidth: 120, scrollWidth: 120,
+    querySelectorAll: () => [box],
+    get clientHeight() { return Math.min(availableHeight, this.scrollHeight); },
+    get scrollHeight() { return Math.ceil(Number.parseFloat(box.style.fontSize) * 12); },
+  };
+  context.getComputedStyle = element => ({ fontSize: element.style.fontSize });
+  card.shadowRoot = { querySelectorAll: () => [stack] };
+  card._fitCaptions();
+  assert.ok(Number.parseFloat(box.style.fontSize) < 20);
+  assert.ok(stack.scrollHeight <= availableHeight);
+  availableHeight = 300;
+  card._fitCaptions();
+  assert.equal(box.style.fontSize, "20px");
+});
+
+test("caption fitting leaves hidden regions ready for a later resize", () => {
+  const card = Object.create(Card.prototype);
+  card._config = { caption: { font_size: "14px" } };
+  const box = { style: {}, _captionFontSize: "14px" };
+  const stack = { clientWidth: 0, clientHeight: 0, querySelectorAll: () => [box] };
+  card.shadowRoot = { querySelectorAll: () => [stack] };
+  card._fitCaptions();
+  assert.equal(box.style.fontSize, "14px");
+});
+
+test("camera and description captions remain literal text", () => {
+  const card = Object.create(Card.prototype);
+  const previousDocument = context.document;
+  const makeElement = () => ({
+    children: [], style: {}, classList: { add() {} },
+    appendChild(child) { this.children.push(child); },
+    set innerHTML(_value) { throw new Error("Caption text must not be parsed as HTML"); },
+  });
+  context.document = { createElement: makeElement };
+  try {
+    const container = makeElement();
+    const description = '<img src="invalid" onerror="alert(1)">';
+    const model = "<script>not markup</script>";
+    const cap = card._normalizeCaption({ show: ["description", "camera_model"] });
+    card._addCaptionRegion(container, { description, camera_model: model }, cap, null, 0);
+    const lines = container.children[0].children[0].children[0].children;
+    assert.equal(lines[0].textContent, description);
+    assert.equal(lines[1].textContent, model);
+    assert.equal(lines[0].children.length, 0);
+  } finally {
+    context.document = previousDocument;
+  }
+});
+
+test("multiple captions keep independent content and styles while legacy config still works", () => {
+  const card = Object.create(Card.prototype);
+  card.setConfig({ entity: "camera.test", caption: { show: ["date"], font_size: "18px" } });
+  assert.equal(card._config.captions.length, 1);
+  assert.equal(card._config.caption.font_size, "18px");
+  card.setConfig({ entity: "camera.test", captions: [
+    { show: ["date"], position: "bottom-left", font_size: "16px" },
+    { show: ["current_date", "current_time"], position: "top-right", font_size: "24px", per_image: false },
+    { show: ["description"], enabled: false },
+  ] });
+  assert.equal(card._config.captions.length, 2);
+  assert.equal(card._config.captions[0].font_size, "16px");
+  assert.equal(card._config.captions[1].font_size, "24px");
+  assert.equal(card._config.captions[1].position, "top-right");
+  assert.equal(card._config.captions[1].per_image, false);
+  card.setConfig({ entity: "camera.test", caption: true, captions: [] });
+  assert.equal(card._config.caption, null);
+  assert.equal(card._config.captions.length, 0);
+  assert.throws(() => card.setConfig({ entity: "camera.test", captions: {} }), /must be a list/);
+});
+
+test("multiple overlays retain paired metadata and allow a whole-frame clock", () => {
+  const card = Object.create(Card.prototype);
+  card.setConfig({ entity: "camera.test", captions: [
+    { show: ["camera"], per_image: true },
+    { show: ["current_time"], position: "top-right" },
+  ] });
+  const container = { style: {}, children: [] };
+  card.shadowRoot = { getElementById: () => container };
+  const added = [];
+  card._addCaptionRegion = (_container, frame, cap, orientation, half) => added.push({ frame, cap, orientation, half });
+  card._fitCaptions = () => {};
+  const data = { pair_orientation: "horizontal", caption_frames: [{ camera_model: "First" }, { camera_model: "Second" }] };
+  card._renderCaptions(data, false);
+  assert.equal(added.length, 3);
+  assert.equal(added[0].frame.camera_model, "First");
+  assert.equal(added[1].frame.camera_model, "Second");
+  assert.equal(added[1].half, 1);
+  assert.equal(added[2].orientation, null);
+  assert.equal(card._captionData, data);
+});
+
+test("today and the clock use HA timezone and stay distinct from the photo date", () => {
+  const card = Object.create(Card.prototype);
+  card._hass = { locale: { language: "en-US", time_format: "24" }, config: { time_zone: "America/Los_Angeles" } };
+  const caption = card._normalizeCaption({ show: ["date", "current_date", "current_time"], date_format: "YYYY-MM-DD", time_seconds: true });
+  const now = new Date("2026-09-30T06:59:58Z");
+  const lines = card._captionLines({ captured_at: "1995-06-01T12:00:00Z" }, caption, now);
+  assert.equal(lines[0], "1995-06-01");
+  assert.equal(lines[1], "2026-09-29");
+  assert.equal(lines[2], "23:59:58");
+  assert.equal(card._captionLines({}, { ...caption, show: ["current_date"] }, new Date("2026-09-30T07:00:00Z"))[0], "2026-09-30");
+  assert.match(card._formatCurrentTime(now, { time_format: "12h" }), /11:59\s*PM/);
+  assert.equal(card._formatCurrentTime(new Date("2026-09-30T07:00:00Z"), { time_format: "24h" }), "00:00");
+});
+
+test("clock refresh is independent of paused photos and stops when removed", () => {
+  const previousSetTimeout = context.setTimeout;
+  const previousClearTimeout = context.clearTimeout;
+  const timers = new Map();
+  let nextId = 0;
+  context.setTimeout = (callback, delay) => { timers.set(++nextId, { callback, delay }); return nextId; };
+  context.clearTimeout = identifier => timers.delete(identifier);
+  try {
+    const card = Object.create(Card.prototype);
+    card.setConfig({ entity: "camera.test", captions: [{ show: ["current_time"], time_seconds: true }] });
+    card.isConnected = true;
+    card._captionData = { paused: true, caption_frames: [{ camera_model: "Shown photo" }] };
+    let refreshed;
+    card._renderCaptions = (data, fade) => { refreshed = { data, fade }; };
+    card._maybeSwap = () => { throw new Error("Clock must not change the photo"); };
+    card._scheduleCaptionClock();
+    assert.equal(timers.size, 1);
+    const timer = [...timers.values()][0];
+    assert.ok(timer.delay > 0 && timer.delay <= 1020);
+    timer.callback();
+    assert.equal(refreshed.data, card._captionData);
+    assert.equal(refreshed.fade, false);
+    card._scheduleCaptionClock();
+    const activeId = card._captionClockTimer;
+    card.disconnectedCallback();
+    assert.ok(!timers.has(activeId));
+    assert.equal(card._captionClockTimer, null);
+  } finally {
+    context.setTimeout = previousSetTimeout;
+    context.clearTimeout = previousClearTimeout;
+  }
+});
+
+test("caption editor adds, duplicates, changes, and removes independent overlays", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", caption: { show: ["date"], font_size: "18px", color: "gold" } });
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._addCaption(0);
+  assert.equal(saved.caption, undefined);
+  assert.equal(saved.captions.length, 2);
+  assert.equal(saved.captions[0].font_size, "18px");
+  assert.equal(saved.captions[1].font_size, "18px");
+  assert.equal(saved.captions[1].color, "gold");
+  assert.equal(saved.captions[1].position, "top-left");
+  assert.notEqual(saved.captions[0].show, saved.captions[1].show);
+  editor._captionChanged(1, { stopPropagation() {}, detail: { value: {
+    caption_show: ["current_date", "current_time"], caption_position: "top-right",
+    caption_font_size: "28px", caption_time_format: "24h", caption_time_seconds: true,
+    caption_per_image: false,
+  } } });
+  assert.equal(JSON.stringify(saved.captions[0].show), '["date"]');
+  assert.equal(JSON.stringify(saved.captions[1].show), '["current_date","current_time"]');
+  assert.equal(saved.captions[1].font_size, "28px");
+  assert.equal(saved.captions[1].time_format, "24h");
+  assert.equal(saved.captions[1].time_seconds, true);
+  assert.equal(saved.captions[1].per_image, false);
+  editor._removeCaption(0);
+  assert.equal(saved.captions.length, 1);
+  assert.equal(saved.captions[0].position, "top-right");
+  editor._removeCaption(0);
+  assert.equal(saved.captions, undefined);
+  assert.equal(saved.caption, undefined);
+});
+
+test("caption editor keeps multiple settings during unrelated card edits and YAML reloads", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  const captions = [
+    { show: ["location"], position: "bottom-left", font_size: "1.2em" },
+    { show: ["current_time"], position: "top-right", time_seconds: true, enabled: false },
+  ];
+  editor.setConfig({ entity: "camera.test", captions });
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._valueChanged({ stopPropagation() {}, detail: { value: { ...editor._data(), transition: "fade" } } });
+  assert.equal(JSON.stringify(saved.captions), JSON.stringify(captions));
+  assert.equal(saved.transition, "fade");
+  editor.setConfig(JSON.parse(JSON.stringify(saved)));
+  assert.equal(editor._captionData(editor._editorCaptions()[1]).caption_enabled, false);
+  assert.equal(editor._captionData(editor._editorCaptions()[0]).caption_font_size, "1.2em");
+});
+
+test("caption editor offers clock controls only when selected and retains empty or disabled rows", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test" });
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._addCaption();
+  assert.ok(saved.caption);
+  assert.ok(!editor._captionSchema().some(field => field.name === "caption_time_format"));
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: {
+    caption_show: ["current_time"], caption_enabled: false,
+  } } });
+  assert.equal(saved.caption.enabled, false);
+  assert.ok(editor._captionSchema().some(field => field.name === "caption_time_format"));
+  assert.ok(!editor._captionSchema().some(field => field.name === "caption_date_format"));
+  assert.ok(!editor._captionSchema().some(field => field.name === "caption_per_image"));
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_show: [] } } });
+  assert.equal(editor._editorCaptions().length, 1);
+  assert.equal(JSON.stringify(saved.caption.show), '[]');
+  const choices = editor._captionSchema().find(field => field.name === "caption_show").selector.select.options;
+  assert.ok(choices.some(option => option.value === "current_date"));
+  assert.ok(choices.some(option => option.value === "current_time"));
+});
+
+test("captions at the same position stack without discarding individual styles", () => {
+  const card = Object.create(Card.prototype);
+  const previousDocument = context.document;
+  const makeElement = () => ({
+    children: [], style: {}, classList: { add() {} },
+    appendChild(child) { this.children.push(child); },
+  });
+  context.document = { createElement: makeElement };
+  try {
+    const container = makeElement();
+    card._addCaptionRegion(container, { description: "Photo" }, card._normalizeCaption({ show: ["description"], font_size: "16px" }), null, 0);
+    card._addCaptionRegion(container, { camera_model: "Camera" }, card._normalizeCaption({ show: ["camera_model"], font_size: "24px" }), null, 0);
+    assert.equal(container.children.length, 1);
+    const boxes = container.children[0]._captionStack.children;
+    assert.equal(boxes.length, 2);
+    assert.equal(boxes[0]._captionFontSize, "16px");
+    assert.equal(boxes[1]._captionFontSize, "24px");
+  } finally {
+    context.document = previousDocument;
+  }
+});
+
+test("captions sharing an edge have nonoverlapping layout areas inside each paired photo", () => {
+  const card = Object.create(Card.prototype);
+  const regions = [
+    [0, 0, 0], [0, 2, 0], [2, 0, 0], [0, 0, 1], [2, 0, 1],
+  ].map(([row, column, half]) => ({ style: {}, _captionRow: row, _captionColumn: column,
+    _captionHalf: half, _captionOrientation: "horizontal" }));
+  card._layoutCaptionRegions({ children: regions });
+  assert.equal(regions[0].style.left, "0%");
+  assert.equal(regions[0].style.right, "75%");
+  assert.equal(regions[1].style.left, "25%");
+  assert.equal(regions[1].style.right, "50%");
+  assert.equal(regions[0].style.bottom, "50%");
+  assert.equal(regions[2].style.top, "50%");
+  assert.equal(regions[3].style.left, "50%");
+  assert.equal(regions[4].style.top, "50%");
+});
+
+test("whole-frame clocks reserve space above per-image metadata on both pair orientations", () => {
+  const card = Object.create(Card.prototype);
+  for (const orientation of ["horizontal", "vertical"]) {
+    const regions = [
+      { style: {}, _captionRow: 0, _captionColumn: 2, _captionHalf: 0, _captionOrientation: null },
+      { style: {}, _captionRow: 2, _captionColumn: 0, _captionHalf: 0, _captionOrientation: orientation },
+      { style: {}, _captionRow: 2, _captionColumn: 0, _captionHalf: 1, _captionOrientation: orientation },
+    ];
+    card._layoutCaptionRegions({ children: regions });
+    const clockBottom = 100 - Number.parseFloat(regions[0].style.bottom);
+    const firstCaptionTop = Number.parseFloat(regions[1].style.top);
+    assert.ok(clockBottom <= firstCaptionTop);
+    assert.equal(regions[0].style.top, "0%");
+    assert.equal(regions[2].style.bottom, "0%");
+  }
+});
+
+test("automatic clock format respects HA's system locale preference", () => {
+  const previousNavigator = context.navigator;
+  context.navigator = { language: "en-GB" };
+  try {
+    const card = Object.create(Card.prototype);
+    card._hass = { locale: { language: "en-US", time_format: "system" }, config: { time_zone: "UTC" } };
+    assert.equal(card._formatCurrentTime(new Date("2026-09-29T17:30:00Z"), { time_format: "auto" }), "17:30");
+  } finally {
+    context.navigator = previousNavigator;
+  }
+});
+
+test("a whole-frame clock stacks with metadata at the same corner in either insertion order", () => {
+  const card = Object.create(Card.prototype);
+  const previousDocument = context.document;
+  const makeElement = () => ({ children: [], style: {}, classList: { add() {} },
+    appendChild(child) { this.children.push(child); } });
+  context.document = { createElement: makeElement };
+  try {
+    for (const clockFirst of [true, false]) {
+      const container = makeElement();
+      const photo = card._normalizeCaption({ show: ["camera_model"], position: "bottom-left" });
+      const clock = card._normalizeCaption({ show: ["current_time"], position: "bottom-left", font_size: "22px" });
+      const addPhoto = () => {
+        card._addCaptionRegion(container, { camera_model: "First" }, photo, "horizontal", 0);
+        card._addCaptionRegion(container, { camera_model: "Second" }, photo, "horizontal", 1);
+      };
+      const addClock = () => card._addCaptionRegion(container, {}, clock, null, 0);
+      if (clockFirst) { addClock(); addPhoto(); } else { addPhoto(); addClock(); }
+      card._layoutCaptionRegions(container);
+      assert.equal(container.children.length, 2);
+      const first = container.children.find(region => region._captionHalf === 0);
+      const second = container.children.find(region => region._captionHalf === 1);
+      assert.equal(first._captionStack.children.length, 2);
+      assert.equal(second._captionStack.children.length, 1);
+      assert.equal(first.style.right, "50%");
+      assert.equal(second.style.left, "50%");
+    }
+  } finally {
+    context.document = previousDocument;
+  }
+});
+
+test("a global centered caption reserves horizontal space between paired captions", () => {
+  const card = Object.create(Card.prototype);
+  const regions = [
+    { style: {}, _captionRow: 2, _captionColumn: 1, _captionHalf: 0, _captionOrientation: "horizontal" },
+    { style: {}, _captionRow: 2, _captionColumn: 1, _captionHalf: 1, _captionOrientation: "horizontal" },
+    { style: {}, _captionRow: 2, _captionColumn: 1, _captionHalf: 0, _captionOrientation: null },
+  ];
+  card._layoutCaptionRegions({ children: regions });
+  assert.ok(100 - Number.parseFloat(regions[0].style.right) <= Number.parseFloat(regions[2].style.left));
+  assert.ok(100 - Number.parseFloat(regions[2].style.right) <= Number.parseFloat(regions[1].style.left));
+});
+
+test("legacy vertical-pair captions retain the full available area in both photos", () => {
+  const card = Object.create(Card.prototype);
+  const regions = [0, 1].map(half => ({ style: {}, _captionRow: 2, _captionColumn: 0,
+    _captionHalf: half, _captionOrientation: "vertical" }));
+  card._layoutCaptionRegions({ children: regions });
+  assert.equal(regions[0].style.top, "0%");
+  assert.equal(regions[0].style.bottom, "50%");
+  assert.equal(regions[1].style.top, "50%");
+  assert.equal(regions[1].style.bottom, "0%");
+});
+
+test("issue 31 custom date plus REL formatting works in legacy and multiple captions", () => {
+  const previousDate = context.Date;
+  const now = new Date("2026-08-27T12:00:00Z");
+  context.Date = class extends Date { static now() { return now.getTime(); } };
+  try {
+    const card = Object.create(Card.prototype);
+    card._hass = { locale: { language: "en-GB" }, config: { time_zone: "UTC" } };
+    const caption = { show: ["date"], date_format: "DD MMMM YYYY - REL" };
+    for (const configuration of [{ caption }, { captions: [caption] }]) {
+      card.setConfig({ entity: "camera.test", ...configuration });
+      const lines = card._captionLines({ captured_at: "2024-08-27T12:00:00Z" }, card._captionConfigs()[0], now);
+      assert.equal(lines[0], "27 August 2024 - 2 years ago");
+      assert.equal(card._formatDate("2024-08-27T12:00:00Z", "YY"), "24");
+    }
+  } finally {
+    if (previousDate === undefined) delete context.Date;
+    else context.Date = previousDate;
+  }
+});
+
+test("today's date has its own preset or custom format without changing photo dates", () => {
+  const card = Object.create(Card.prototype);
+  card._hass = { locale: { language: "en-GB" }, config: { time_zone: "UTC" } };
+  const caption = card._normalizeCaption({
+    show: ["date", "current_date"], date_format: "year", current_date_format: "DD MMMM YYYY",
+  });
+  const lines = card._captionLines({ captured_at: "1995-06-01T12:00:00Z" }, caption, new Date("2026-09-29T12:00:00Z"));
+  assert.equal(JSON.stringify(lines), '["1995","29 September 2026"]');
+  const preset = { ...caption, current_date_format: "month_year" };
+  assert.equal(card._captionLines({}, { ...preset, show: ["current_date"] }, new Date("2026-09-29T12:00:00Z"))[0], "September 2026");
+  assert.equal(card._normalizeCaption({ show: ["current_date"], date_format: "YYYY" }).current_date_format, "YYYY");
+});
+
+test("date format editor preserves REL and independently saves today's format", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", caption: { show: ["date", "current_date"], date_format: "DD MMMM YYYY - REL" } });
+  const schema = editor._captionSchema();
+  for (const name of ["caption_date_format", "caption_current_date_format"]) {
+    const field = schema.find(item => item.name === name);
+    assert.equal(field.selector.select.custom_value, true);
+    assert.ok(field.selector.select.options.some(option => option.value.includes("REL")));
+  }
+  assert.equal(editor._computeLabel({ name: "caption_current_date_format" }), "Today's date format");
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_current_date_format: "weekday" } } });
+  assert.equal(saved.caption.date_format, "DD MMMM YYYY - REL");
+  assert.equal(saved.caption.current_date_format, "weekday");
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_current_date_format: "medium" } } });
+  assert.equal(saved.caption.current_date_format, "medium");
+  editor.setConfig(JSON.parse(JSON.stringify(saved)));
+  assert.equal(editor._captionData().caption_current_date_format, "medium");
+  assert.equal(editor._captionData().caption_date_format, "DD MMMM YYYY - REL");
+  const todayOnly = editor._captionSchema({ show: ["current_date"] });
+  assert.ok(todayOnly.some(field => field.name === "caption_current_date_format"));
+  assert.ok(!todayOnly.some(field => field.name === "caption_date_format"));
+});
+
+test("weather captions require an explicitly selected weather entity or sensor", () => {
+  const card = Object.create(Card.prototype);
+  card._hass = { states: { "weather.home": { state: "sunny", attributes: { temperature: 20 } } } };
+  for (const entity of [undefined, "", "light.example", "weather.", "sensor.bad id"]) {
+    const caption = card._normalizeCaption({ show: ["weather"], weather_entity: entity });
+    assert.equal(caption.weather_entity, null);
+    assert.equal(JSON.stringify(card._captionLines({}, caption)), '[]');
+  }
+  assert.equal(card._normalizeCaption({ show: ["weather"], weather_entity: " sensor.outdoor_temperature " }).weather_entity, "sensor.outdoor_temperature");
+});
+
+test("weather captions use HA formatters for conditions, temperatures, and sensor units", () => {
+  const card = Object.create(Card.prototype);
+  const weather = { entity_id: "weather.home", state: "partlycloudy", attributes: { temperature: 22.5, temperature_unit: "C" } };
+  const sensor = { entity_id: "sensor.outdoor_temperature", state: "22.5", attributes: { unit_of_measurement: "C" } };
+  card._hass = {
+    states: { "weather.home": weather, "sensor.outdoor_temperature": sensor },
+    formatEntityState: entity => entity === weather ? "Partly cloudy" : "22.5 C",
+    formatEntityAttributeValue: (entity, attribute) => {
+      assert.equal(entity, weather);
+      assert.equal(attribute, "temperature");
+      return "22.5 C";
+    },
+  };
+  assert.equal(card._weatherCaption({ weather_entity: "weather.home" }), "Partly cloudy, 22.5 C");
+  assert.equal(card._weatherCaption({ weather_entity: "sensor.outdoor_temperature" }), "22.5 C");
+});
+
+test("weather captions handle unavailable entities, missing temperatures, and zero", () => {
+  const card = Object.create(Card.prototype);
+  card._hass = { locale: { language: "en" }, states: {} };
+  const caption = { weather_entity: "weather.home" };
+  assert.equal(card._weatherCaption(caption), "");
+  for (const state of ["unknown", "unavailable", ""]) {
+    card._hass.states["weather.home"] = { state, attributes: {} };
+    assert.equal(card._weatherCaption(caption), "");
+  }
+  card._hass.states["weather.home"] = { state: "sunny", attributes: { temperature: 0, temperature_unit: "C" } };
+  assert.equal(card._weatherCaption(caption), "Sunny, 0 C");
+  for (const temperature of [undefined, null, NaN, Infinity, "20"]) {
+    card._hass.states["weather.home"].attributes.temperature = temperature;
+    assert.equal(card._weatherCaption(caption), "Sunny");
+  }
+  card._hass.states["sensor.outdoor"] = { state: "19.2", attributes: { unit_of_measurement: "C" } };
+  assert.equal(card._weatherCaption({ weather_entity: "sensor.outdoor" }), "19.2 C");
+});
+
+test("weather-only overlays appear once over a paired slide", () => {
+  const card = Object.create(Card.prototype);
+  card.setConfig({ entity: "camera.test", captions: [{ show: ["weather"], weather_entity: "weather.home" }] });
+  const container = { children: [], style: {} };
+  card.shadowRoot = { getElementById: () => container };
+  const added = [];
+  card._addCaptionRegion = (_container, _frame, _caption, orientation) => added.push(orientation);
+  card._fitCaptions = () => {};
+  card._renderCaptions({ pair_orientation: "horizontal", caption_frames: [{}, {}] }, false);
+  assert.equal(JSON.stringify(added), '[null]');
+});
+
+test("selected weather updates captions while the displayed photo is held", () => {
+  const card = Object.create(Card.prototype);
+  card.setConfig({ entity: "camera.test", captions: [{ show: ["weather"], weather_entity: "weather.home" }] });
+  card._rendered = true;
+  card._captionData = { paused: true, caption_frames: [{ description: "Displayed photo" }] };
+  card._hass = { locale: { language: "en" }, states: { "weather.home": { state: "sunny", attributes: {} } } };
+  card._maybeSwap = () => {};
+  card._loadAndSwap = () => { throw new Error("Weather must not fetch a new slide"); };
+  const updates = [];
+  card._renderCaptions = (data, fade) => updates.push({ data, fade });
+  card.hass = { ...card._hass, states: { ...card._hass.states, "sensor.other": { state: "20" } } };
+  assert.equal(updates.length, 0);
+  card.hass = { ...card._hass, states: { ...card._hass.states, "weather.home": { state: "rainy", attributes: {} } } };
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].data, card._captionData);
+  assert.equal(updates[0].fade, false);
+  card.hass = { ...card._hass, states: { ...card._hass.states, "weather.home": { state: "unavailable", attributes: {} } } };
+  assert.equal(updates.length, 2);
+});
+
+test("weather selector is conditional, required, and saves independently per caption", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", caption: { show: ["date"] } });
+  assert.ok(!editor._captionSchema().some(field => field.name === "caption_weather_entity"));
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_show: ["weather"] } } });
+  const field = editor._captionSchema().find(item => item.name === "caption_weather_entity");
+  assert.equal(field.required, true);
+  assert.equal(JSON.stringify(field.selector.entity.filter), '[{"domain":["weather","sensor"]}]');
+  assert.equal(editor._captionData().caption_weather_entity, "");
+  assert.ok(!editor._captionSchema().some(item => item.name === "caption_per_image"));
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_weather_entity: "weather.home" } } });
+  assert.equal(saved.caption.weather_entity, "weather.home");
+  editor._addCaption(0);
+  assert.equal(saved.captions[1].weather_entity, "weather.home");
+  editor._captionChanged(1, { stopPropagation() {}, detail: { value: { caption_weather_entity: "sensor.outdoor_temperature" } } });
+  assert.equal(saved.captions[0].weather_entity, "weather.home");
+  assert.equal(saved.captions[1].weather_entity, "sensor.outdoor_temperature");
+  editor._valueChanged({ stopPropagation() {}, detail: { value: editor._data() } });
+  assert.equal(saved.captions[1].weather_entity, "sensor.outdoor_temperature");
+});
+
+test("caption content uses HA draggable chips and retains reordered content", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", captions: [
+    { show: ["date", "location", "camera"], position: "bottom-right", date_format: "DD MMMM YYYY - REL" },
+    { show: ["weather"], weather_entity: "weather.home" },
+  ] });
+  const selector = editor._captionSchema().find(field => field.name === "caption_show").selector.select;
+  assert.equal(selector.multiple, true);
+  assert.equal(selector.reorder, true);
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: {
+    caption_show: ["camera", "date", "location"],
+  } } });
+  assert.equal(JSON.stringify(saved.captions[0].show), '["camera","date","location"]');
+  assert.equal(saved.captions[0].position, "bottom-right");
+  assert.equal(saved.captions[0].date_format, "DD MMMM YYYY - REL");
+  assert.equal(saved.captions[1].weather_entity, "weather.home");
+  editor.setConfig(JSON.parse(JSON.stringify(saved)));
+  assert.equal(JSON.stringify(editor._captionData().caption_show), '["camera","date","location"]');
+  const card = Object.create(Card.prototype);
+  card._hass = { locale: { language: "en-GB" } };
+  const lines = card._captionLines({ camera_model: "Test camera", captured_at: "2024-08-27T12:00:00Z", location: "Test place" }, {
+    ...card._normalizeCaption(saved.captions[0]), date_format: "year",
+  });
+  assert.equal(JSON.stringify(lines), '["Test camera","2024","Test place"]');
+});
+
+test("caption headers show placement as title and ordered content as subtitle", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", captions: [
+    { show: ["date", "location", "camera"], position: "bottom-right" },
+    { show: ["current_time"], position: "top-left", enabled: false },
+  ] });
+  const items = [0, 1].map(() => {
+    const nodes = { ".caption-title": {}, ".caption-meta": {}, summary: {
+      setAttribute(name, value) { this[name] = value; },
+    }, ".caption-controls": {}, ".caption-options": {} };
+    return { nodes, classList: { toggle() {} }, querySelector: selector => nodes[selector] };
+  });
+  editor.shadowRoot = { querySelector: () => ({ children: items }) };
+  editor._updateCaptionContentPicker = () => {};
+  editor._renderCaptionEditors();
+  assert.equal(items[0].nodes[".caption-title"].textContent, "Bottom right");
+  assert.equal(items[0].nodes[".caption-meta"].textContent, "Photo date, Location, Camera (make and model)");
+  assert.equal(items[0].nodes[".caption-meta"].title, items[0].nodes[".caption-meta"].textContent);
+  assert.equal(items[1].nodes[".caption-title"].textContent, "Top left (off)");
+  assert.equal(items[1].nodes[".caption-meta"].textContent, "Current time");
+  assert.match(items[0].nodes.summary["aria-label"], /^Caption 1: Bottom right\./);
+});
+
+test("tile-style content picker reorder persists only the targeted caption", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", captions: [
+    { show: ["date", "location", "camera"], position: "bottom-right", date_format: "DD MMMM YYYY - REL" },
+    { show: ["current_time"], time_format: "24h" },
+  ] });
+  const saved = [];
+  editor.dispatchEvent = event => saved.push(event.detail.config);
+  let stopped = false;
+  editor._moveCaptionContent(0, { stopPropagation() { stopped = true; }, detail: { oldIndex: 2, newIndex: 0 } });
+  assert.equal(stopped, true);
+  assert.equal(JSON.stringify(saved[0].captions[0].show), '["camera","date","location"]');
+  assert.equal(saved[0].captions[0].date_format, "DD MMMM YYYY - REL");
+  assert.equal(saved[0].captions[1].time_format, "24h");
+  for (const [oldIndex, newIndex] of [[0, 0], [-1, 0], [0, 3], [undefined, 0], [0, "2"]]) {
+    editor._moveCaptionContent(0, { stopPropagation() {}, detail: { oldIndex, newIndex } });
+  }
+  assert.equal(saved.length, 1);
+});

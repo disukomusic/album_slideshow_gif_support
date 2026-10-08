@@ -5,6 +5,7 @@ import asyncio
 import io
 from types import SimpleNamespace
 
+from aiohttp import ClientResponseError, RequestInfo
 from multidict import CIMultiDict
 from PIL import Image, UnidentifiedImageError
 import pytest
@@ -50,6 +51,7 @@ class _Response:
 class _Hass:
     def __init__(self):
         self.data = {}
+        self.verify_ssl = None
 
     async def async_add_executor_job(self, func, *args):
         return func(*args)
@@ -73,7 +75,12 @@ def make_camera(monkeypatch):
             return response
 
         session = SimpleNamespace(get=get)
-        monkeypatch.setattr(camera, "async_get_clientsession", lambda _hass: session)
+
+        def get_session(hass, verify_ssl=True):
+            hass.verify_ssl = verify_ssl
+            return session
+
+        monkeypatch.setattr(camera, "async_get_clientsession", get_session)
         cam = camera.AlbumSlideshowCamera.__new__(camera.AlbumSlideshowCamera)
         cam.hass = _Hass()
         cam.coordinator = SimpleNamespace(image_request_headers=None)
@@ -116,7 +123,40 @@ def test_redirect_into_icloud_uses_final_response_hostname(make_camera):
     cam, _response, requests = make_camera()
     source_url = "https://www.icloud.com/image-redirect"
     assert asyncio.run(cam._http_get(source_url)) == b"image-bytes"
-    assert requests == [(source_url, {"headers": None})]
+    assert requests == [(source_url, {"headers": None, "params": None})]
+
+
+def test_tls_verification_follows_the_coordinator(make_camera):
+    cam, _response, _requests = make_camera()
+    asyncio.run(cam._http_get(_ICLOUD_URL))
+    assert cam.hass.verify_ssl is True
+    cam.coordinator = SimpleNamespace(
+        image_request_headers=None, image_request_verify_ssl=False,
+    )
+    asyncio.run(cam._http_get(_ICLOUD_URL))
+    assert cam.hass.verify_ssl is False
+
+
+def test_fetch_time_params_are_sent_but_kept_out_of_error_logs(make_camera, caplog):
+    source_url = "https://nas.example/ugreen/v5/photo/picture/stream?id=2"
+    cam, response, requests = make_camera(source_url, headers={"Content-Type": "image/jpeg"})
+    cam.coordinator = SimpleNamespace(
+        image_request_headers=None, image_request_params={"ugk": "SECRET"},
+    )
+    assert asyncio.run(cam._http_get(source_url)) == b"image-bytes"
+    assert requests[0][1]["params"] == {"ugk": "SECRET"}
+
+    real_url = URL(source_url).update_query(ugk="SECRET")
+
+    def raise_for_status():
+        raise ClientResponseError(
+            RequestInfo(real_url, "GET", CIMultiDict(), real_url), (), status=401,
+        )
+
+    response.raise_for_status = raise_for_status
+    assert asyncio.run(cam._http_get(source_url)) is None
+    assert "HTTP 401" in caplog.text
+    assert "SECRET" not in caplog.text
 
 
 def test_redirect_away_from_icloud_does_not_inherit_binary_exception(make_camera):

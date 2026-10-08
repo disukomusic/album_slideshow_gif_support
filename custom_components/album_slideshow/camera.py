@@ -5,11 +5,13 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
+import math
 import random
 from pathlib import Path
 from typing import Any
 
 import async_timeout
+from aiohttp import ClientResponseError
 from PIL import Image
 
 from homeassistant.components.camera import Camera
@@ -20,6 +22,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
+    CAMERA_METADATA_FIELDS,
+    DEFAULT_CUSTOM_LOOKBACK_DAYS,
+    DEFAULT_SHUFFLE_AGE_BIAS,
+    DEFAULT_MISSING_DATE_MODE,
     MAX_RESOLUTION_SHORT_EDGE,
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_AVOID,
@@ -111,17 +117,39 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _item_focus(item: MediaItem | None) -> tuple[float, float] | None:
-    """Return a validated normalised crop focus stored on a media item."""
-    if item is None:
+def _camera_metadata_attributes(item: MediaItem | None) -> dict[str, Any]:
+    metadata = getattr(item, "camera_metadata", None)
+    return {
+        field: metadata.get(field) if isinstance(metadata, dict) else None
+        for field in CAMERA_METADATA_FIELDS
+    }
+
+
+def _item_faces(item: MediaItem | None) -> tuple[ip.FaceBox, ...] | None:
+    """Return the validated face boxes stored on a media item.
+
+    None means no face data; an empty tuple means the photo has no faces.
+    """
+    faces = getattr(item, "faces", None) if item is not None else None
+    if not isinstance(faces, (list, tuple)):
         return None
-    x = getattr(item, "focus_x", None)
-    y = getattr(item, "focus_y", None)
-    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-        return None
-    if not 0 <= x <= 1 or not 0 <= y <= 1:
-        return None
-    return (float(x), float(y))
+    valid: list[ip.FaceBox] = []
+    for face in faces:
+        if (
+            not isinstance(face, (list, tuple))
+            or len(face) not in (5, 6)
+            or not all(
+                not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) for value in face[:5]
+            )
+            or (len(face) == 6 and not isinstance(face[5], bool))
+        ):
+            continue
+        left, top, right, bottom, weight = (float(value) for value in face[:5])
+        if 0 <= left < right <= 1 and 0 <= top < bottom <= 1 and weight > 0:
+            selected = face[5] if len(face) == 6 else False
+            valid.append(ip.FaceBox(left, top, right, bottom, weight, selected))
+    return tuple(valid)
 
 
 class _DownloadCache:
@@ -221,6 +249,7 @@ class AlbumSlideshowCamera(Camera):
         self._frame_id: int = 0
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
+        self._slide_deadline: float | None = None
         # Navigation runs directly in the button/service coroutine. The lock
         # serialises rapid presses while buffered swaps remain independent of
         # the background timer loop.
@@ -257,6 +286,7 @@ class AlbumSlideshowCamera(Camera):
         def _on_store_change() -> None:
             self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
             self._effective_cache = None
+            self._slide_deadline = None
             self._invalidate_timeline()
 
         store.add_listener(_on_store_change)
@@ -363,12 +393,14 @@ class AlbumSlideshowCamera(Camera):
             "captured_at_primary": captured_at,
             "uploaded_at": _ts_to_iso(getattr(cur, "uploaded_at", None)),
             "byte_size": getattr(cur, "byte_size", None),
-            # GPS + reverse-geocoded label come from EXIF for local-folder
-            # entries; Google albums leave these as ``None``.
             "latitude": getattr(cur, "latitude", None),
             "longitude": getattr(cur, "longitude", None),
             "location": getattr(cur, "location", None),
             "description": getattr(cur, "description", None),
+            **_camera_metadata_attributes(cur),
+            "google_metadata_enabled": bool(getattr(self.coordinator, "google_metadata_enabled", False)),
+            "google_location_enabled": bool(getattr(self.coordinator, "google_location_enabled", False)),
+            "google_reverse_geocode_enabled": bool(getattr(self.coordinator, "google_reverse_geocode_enabled", False)),
             # Structured per-image caption metadata. A single-element list for
             # normal slides; two elements (top/left first) for paired slides,
             # so the card can overlay an accurate date/location on each half.
@@ -381,6 +413,8 @@ class AlbumSlideshowCamera(Camera):
             "portrait_mode": self.store.portrait_mode,
             "order_mode": self.store.order_mode,
             "date_filter": self.store.date_filter,
+            "custom_lookback_days": int(self.store.custom_lookback_days),
+            "shuffle_age_bias": int(self.store.shuffle_age_bias),
             "missing_date_mode": self.store.missing_date_mode,
             "paused": bool(self.store.paused),
             "refresh_hours": int(self.store.refresh_hours),
@@ -423,6 +457,7 @@ class AlbumSlideshowCamera(Camera):
                 "latitude": getattr(cur, "latitude", None),
                 "longitude": getattr(cur, "longitude", None),
                 "description": getattr(cur, "description", None),
+                **_camera_metadata_attributes(cur),
             }
         ]
 
@@ -459,6 +494,7 @@ class AlbumSlideshowCamera(Camera):
         cache_key = (
             id(raw),
             self.store.date_filter,
+            getattr(self.store, "custom_lookback_days", DEFAULT_CUSTOM_LOOKBACK_DAYS),
             self.store.missing_date_mode,
             self.store.order_mode,
             self.store.hidden_revision,
@@ -470,6 +506,7 @@ class AlbumSlideshowCamera(Camera):
             [item for item in raw if item.photo_id and item.photo_id not in self.store.hidden_photo_ids]
             if self.store.hidden_photo_ids else raw,
             mode=self.store.date_filter,
+            lookback_days=getattr(self.store, "custom_lookback_days", DEFAULT_CUSTOM_LOOKBACK_DAYS),
             missing_date=self.store.missing_date_mode,
         )
         ordered = playlist.order_items(filtered, self.store.order_mode)
@@ -493,6 +530,7 @@ class AlbumSlideshowCamera(Camera):
         self._last_nav_outcome = "pending"
         self._last_nav_error = None
         # Wake the timer loop so the manual frame starts a fresh interval.
+        self._slide_deadline = None
         self._interrupt_event.set()
         self.async_write_ha_state()
 
@@ -522,6 +560,8 @@ class AlbumSlideshowCamera(Camera):
             )
         finally:
             self._navigation_pending -= 1
+            self._slide_deadline = None
+            self._interrupt_event.set()
             self.async_write_ha_state()
 
     async def async_force_refresh(self) -> None:
@@ -1045,6 +1085,7 @@ class AlbumSlideshowCamera(Camera):
 
     async def _render_loop(self, initial_delay: float = 0.0) -> None:
         """Display buffered frames on command/timer and refill them in the background."""
+        loop = asyncio.get_running_loop()
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)
 
@@ -1075,6 +1116,8 @@ class AlbumSlideshowCamera(Camera):
 
         while True:
             try:
+                if self._slide_deadline is None:
+                    self._slide_deadline = loop.time() + float(int(self.store.slide_interval))
                 if self._timeline_dirty:
                     async with self._navigation_lock:
                         if self._timeline_dirty:
@@ -1082,16 +1125,22 @@ class AlbumSlideshowCamera(Camera):
                     continue
 
                 interrupted = await self._wait_or_interrupt(
-                    float(int(self.store.slide_interval))
+                    max(0.0, self._slide_deadline - loop.time())
                 )
                 if not interrupted and not self.store.paused:
                     async with self._navigation_lock:
-                        if not self._timeline_dirty:
+                        if (
+                            not self._timeline_dirty
+                            and self._slide_deadline is not None
+                            and loop.time() >= self._slide_deadline
+                        ):
                             await self._show_next_frame()
+                            self._slide_deadline = loop.time() + float(int(self.store.slide_interval))
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as err:
+                self._slide_deadline = None
                 self._consecutive_failures += 1
                 _LOGGER.warning(
                     "Album Slideshow: buffered navigation/render failed (attempt %d): %s",
@@ -1134,7 +1183,8 @@ class AlbumSlideshowCamera(Camera):
             self._index = (self._index + 1) % count
             return
 
-        self._index = self._next_random_index(count)
+        bias = getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
+        self._index = self._next_age_weighted_index(items, bias) if bias else self._next_random_index(count)
         cur_url = items[self._index].url
         self._recent_urls.append(cur_url)
         keep = min(20, max(1, count - 1))
@@ -1151,6 +1201,13 @@ class AlbumSlideshowCamera(Camera):
             self._index = 0
             return
         self._index = (self._index + 1) % count
+
+    def _crop_hints(self, item: MediaItem | None) -> ip.CropHints:
+        return ip.CropHints(
+            faces=_item_faces(item),
+            debug=bool(getattr(getattr(self, "store", None), "face_debug", False)),
+            name=getattr(item, "filename", None),
+        )
 
     async def _compose_for_index(
         self, items: list[MediaItem]
@@ -1213,7 +1270,7 @@ class AlbumSlideshowCamera(Camera):
                         composed = await self._async_image_job(
                             ip.pair_images, img, other_img, width, height, fill_mode,
                             is_portrait_canvas, divider, divider_fill, transparent_divider,
-                            _item_focus(cur), _item_focus(other_item),
+                            self._crop_hints(cur), self._crop_hints(other_item),
                         )
                         pair_frames = [
                             {
@@ -1222,6 +1279,7 @@ class AlbumSlideshowCamera(Camera):
                                 "latitude": getattr(cur, "latitude", None),
                                 "longitude": getattr(cur, "longitude", None),
                                 "description": getattr(cur, "description", None),
+                                **_camera_metadata_attributes(cur),
                             },
                             {
                                 "captured_at": _ts_to_iso(getattr(other_item, "captured_at", None)),
@@ -1229,12 +1287,13 @@ class AlbumSlideshowCamera(Camera):
                                 "latitude": getattr(other_item, "latitude", None),
                                 "longitude": getattr(other_item, "longitude", None),
                                 "description": getattr(other_item, "description", None),
+                                **_camera_metadata_attributes(other_item),
                             },
                         ]
                         pair_meta = [f["captured_at"] for f in pair_frames]
                     else:
                         composed = await self._async_image_job(
-                            ip.render_image, img, fill_mode, width, height, _item_focus(cur),
+                            ip.render_image, img, fill_mode, width, height, self._crop_hints(cur),
                         )
                 finally:
                     ip.safe_close(other_img)
@@ -1257,7 +1316,7 @@ class AlbumSlideshowCamera(Camera):
                 return composed, meta
 
             composed = await self._async_image_job(
-                ip.render_image, img, fill_mode, width, height, _item_focus(cur)
+                ip.render_image, img, fill_mode, width, height, self._crop_hints(cur)
             )
             return composed, {
                 "is_portrait": cur_is_portrait,
@@ -1309,7 +1368,7 @@ class AlbumSlideshowCamera(Camera):
                 if self._index != start:
                     self._do_advance(count, items)
                 composed = await self._async_image_job(
-                    ip.render_image, img, fill_mode, width, height, _item_focus(cur)
+                    ip.render_image, img, fill_mode, width, height, self._crop_hints(cur)
                 )
                 return composed, {
                     "is_portrait": is_portrait_canvas,
@@ -1335,7 +1394,7 @@ class AlbumSlideshowCamera(Camera):
         try:
             cur_is_portrait = ip.is_portrait_item(item, img)
             composed = await self._async_image_job(
-                ip.render_image, img, fill_mode, width, height, _item_focus(item)
+                ip.render_image, img, fill_mode, width, height, self._crop_hints(item)
             )
             return composed, {
                 "is_portrait": cur_is_portrait,
@@ -1438,6 +1497,23 @@ class AlbumSlideshowCamera(Camera):
 
         return None
 
+    def _next_age_weighted_index(self, items: list[MediaItem], bias: int) -> int:
+        weights = playlist.age_weights(
+            items, bias, missing_date=getattr(self.store, "missing_date_mode", DEFAULT_MISSING_DATE_MODE),
+        )
+        count = len(items)
+        if count <= 1 or min(weights) == max(weights):
+            return self._next_random_index(count)
+        cooldown = min(5, max(1, count // 10))
+        recent = set(self._recent_urls[-cooldown:])
+        candidates = [
+            index for index, item in enumerate(items)
+            if index != self._index and item.url not in recent
+        ]
+        if not candidates:
+            candidates = [index for index in range(count) if index != self._index]
+        return self._rng.choices(candidates, weights=[weights[index] for index in candidates], k=1)[0]
+
     def _next_random_index(self, count: int) -> int:
         if count <= 1:
             self._random_order = [0]
@@ -1523,12 +1599,26 @@ class AlbumSlideshowCamera(Camera):
             return dict(headers)
         return None
 
+    def _image_request_params(self, url: str) -> dict[str, str] | None:
+        """Session query params added at fetch time only (UGREEN ``ugk``)."""
+        params = getattr(self.coordinator, "image_request_params", None)
+        if params and isinstance(url, str) and url.startswith("http"):
+            return dict(params)
+        return None
+
     async def _http_get(self, url: str) -> bytes | None:
         """Fetch one remote image with validation and a hard timeout."""
-        session = async_get_clientsession(self.hass)
+        session = async_get_clientsession(
+            self.hass,
+            verify_ssl=getattr(self.coordinator, "image_request_verify_ssl", True),
+        )
         try:
             async with async_timeout.timeout(30):
-                async with session.get(url, headers=self._image_request_headers(url)) as resp:
+                async with session.get(
+                    url,
+                    headers=self._image_request_headers(url),
+                    params=self._image_request_params(url),
+                ) as resp:
                     resp.raise_for_status()
 
                     content_type = resp.headers.get("Content-Type", "")
@@ -1578,6 +1668,12 @@ class AlbumSlideshowCamera(Camera):
                             return None
                         chunks.append(chunk)
                     return b"".join(chunks)
+        except ClientResponseError as err:
+            # str(err) includes the full request URL, fetch-time params and all.
+            _LOGGER.warning(
+                "Album Slideshow: failed to fetch image %s: HTTP %s", url, err.status
+            )
+            return None
         except Exception as err:
             _LOGGER.warning("Album Slideshow: failed to fetch image: %s", err)
             return None

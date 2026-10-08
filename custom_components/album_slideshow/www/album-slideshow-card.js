@@ -26,7 +26,7 @@
  *   tap_action: none        # none | more-info
  */
 
-const VERSION = "1.12.0";
+const VERSION = "1.14.0";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
@@ -62,7 +62,12 @@ function normalizePhotoControls(value) {
 // Caption overlay (date / location / description). ``show`` is an ordered
 // subset of these fields; ``position`` is one of a 3x3 anchor grid;
 // ``date_format`` is one of the named presets below or a custom token string.
-const CAPTION_FIELDS = ["date", "location", "description"];
+const CAMERA_CAPTION_FIELDS = [
+  "camera_make", "camera_model", "focal_length_mm", "aperture_f_number",
+  "iso", "exposure_time_seconds",
+];
+const CAPTION_FIELDS = ["date", "location", "description", "camera", ...CAMERA_CAPTION_FIELDS, "current_date", "current_time", "weather"];
+const LIVE_CAPTION_FIELDS = new Set(["current_date", "current_time", "weather"]);
 const CAPTION_POSITIONS = new Set([
   "top-left",
   "top-center",
@@ -604,6 +609,11 @@ function createAlbumSlideshowCardClass(Base) {
     if (!FIT_MODES.has(fit)) {
       throw new Error(`album-slideshow-card: unknown fit '${fit}'`);
     }
+    if (config.captions != null && !Array.isArray(config.captions)) {
+      throw new Error("album-slideshow-card: 'captions' must be a list");
+    }
+    const captions = (config.captions ?? [config.caption])
+      .map((caption) => this._normalizeCaption(caption)).filter(Boolean);
     this._config = {
       ...config,
       transition,
@@ -622,8 +632,8 @@ function createAlbumSlideshowCardClass(Base) {
         config.tap_pause_seconds === 0
           ? 0
           : Number(config.tap_pause_seconds ?? 8),
-      // Caption overlay (date / location). ``null`` when disabled.
-      caption: this._normalizeCaption(config.caption),
+      caption: captions[0] || null,
+      captions,
     };
     if (this._rendered) {
       // Config edited live; rebuild styles + reset state.
@@ -643,6 +653,7 @@ function createAlbumSlideshowCardClass(Base) {
     if (raw == null || raw === false) return null;
     if (raw === true) raw = {};
     if (typeof raw !== "object") return null;
+    if (raw.enabled === false) return null;
     let show = raw.show;
     if (typeof show === "string") show = show.split(/[,\s]+/);
     if (!Array.isArray(show)) show = ["date", "location"];
@@ -668,6 +679,11 @@ function createAlbumSlideshowCardClass(Base) {
       position,
       per_image: raw.per_image !== false,
       date_format: raw.date_format != null ? String(raw.date_format) : "medium",
+      current_date_format: String(raw.current_date_format ?? raw.date_format ?? "medium"),
+      time_format: ["auto", "12h", "24h"].includes(raw.time_format) ? raw.time_format : "auto",
+      time_seconds: raw.time_seconds === true,
+      weather_entity: typeof raw.weather_entity === "string" && /^(weather|sensor)\.[a-z0-9_]+$/.test(raw.weather_entity.trim())
+        ? raw.weather_entity.trim() : null,
       color,
       font_size: fontSize,
       font_weight: fontWeight,
@@ -686,10 +702,15 @@ function createAlbumSlideshowCardClass(Base) {
     } else {
       this._setupPhotoControlsReveal();
     }
+    this._captionResizeObserver ??= new ResizeObserver(() => this._fitCaptions());
+    this._captionResizeObserver.observe(this);
     this._maybeSwap();
   }
 
   disconnectedCallback() {
+    this._captionResizeObserver?.disconnect();
+    clearTimeout(this._captionClockTimer);
+    this._captionClockTimer = null;
     this._cancelControlNavigation();
     this._controlsReveal?.dispose();
     this._controlsReveal = null;
@@ -701,9 +722,14 @@ function createAlbumSlideshowCardClass(Base) {
   }
 
   set hass(hass) {
+    const previous = this._hass;
     this._hass = hass;
     if (!this._rendered) return;
     this._maybeSwap();
+    if (this._captionData && this._captionConfigs().some((cap) => cap.show.includes("weather") && cap.weather_entity &&
+      (previous?.states?.[cap.weather_entity] !== hass.states?.[cap.weather_entity] || previous?.locale !== hass.locale))) {
+      this._renderCaptions(this._captionData, false);
+    }
   }
 
   _resolvedFit(attrs) {
@@ -722,6 +748,9 @@ function createAlbumSlideshowCardClass(Base) {
 
   _renderShell() {
     const c = this._config;
+    clearTimeout(this._captionClockTimer);
+    this._captionClockTimer = null;
+    this._captionData = null;
     this._cancelControlNavigation();
     this._controlsReveal?.dispose();
     this._controlsReveal = null;
@@ -813,15 +842,26 @@ function createAlbumSlideshowCardClass(Base) {
           display: flex;
           padding: 3.5% 4%;
           box-sizing: border-box;
+          min-width: 0;
+          overflow: hidden;
         }
         .cap-box {
           display: flex;
           flex-direction: column;
-          max-width: 92%;
+          flex-shrink: 0;
+          max-width: 100%;
+          max-height: 100%;
+          min-width: 0;
+          overflow: hidden;
+          overflow-wrap: anywhere;
           line-height: 1.25;
           font-family: var(--paper-font-body1_-_font-family, sans-serif);
         }
-        .cap-line { font-weight: inherit; }
+        .cap-stack {
+          display: flex; flex-direction: column; gap: 4px;
+          max-width: 100%; max-height: 100%; min-width: 0; overflow: hidden;
+        }
+        .cap-line { font-weight: inherit; flex-shrink: 0; font-variant-numeric: tabular-nums; }
         #photo-controls { position: absolute; right: 8px; max-width: calc(100% - 16px); ${c.caption?.position.startsWith("top") ? "bottom" : "top"}: 8px; z-index: 3; }
         .cap-box.cap-shadow {
           text-shadow:
@@ -1033,6 +1073,7 @@ function createAlbumSlideshowCardClass(Base) {
           latitude: attrs.latitude,
           longitude: attrs.longitude,
           description: attrs.description,
+          ...Object.fromEntries(CAMERA_CAPTION_FIELDS.map((field) => [field, attrs[field]])),
         }
       : null;
     const photoData = {
@@ -1047,6 +1088,9 @@ function createAlbumSlideshowCardClass(Base) {
   }
 
   _clearDisplayedPhotos() {
+    clearTimeout(this._captionClockTimer);
+    this._captionClockTimer = null;
+    this._captionData = null;
     this._loadGeneration += 1;
     this._displayedPhotoIds = [];
     this._displayedFrameId = null;
@@ -1195,26 +1239,31 @@ function createAlbumSlideshowCardClass(Base) {
   }
 
   _renderCaptions(captionData, fade) {
-    const cap = this._config.caption;
+    clearTimeout(this._captionClockTimer);
+    this._captionClockTimer = null;
+    this._captionData = captionData;
+    const captions = this._captionConfigs();
     const container =
       this.shadowRoot && this.shadowRoot.getElementById("captions");
     if (!container) return;
     container.innerHTML = "";
-    if (!cap || !captionData) return;
+    if (!captions.length || !captionData) return;
 
     const frames = this._buildCaptionFrames(captionData);
     const orientation = captionData.pair_orientation;
-    const isPair =
-      cap.per_image &&
-      frames.length >= 2 &&
-      (orientation === "horizontal" || orientation === "vertical");
-
-    if (isPair) {
-      this._addCaptionRegion(container, frames[0], cap, orientation, 0);
-      this._addCaptionRegion(container, frames[1], cap, orientation, 1);
-    } else {
-      this._addCaptionRegion(container, frames[0], cap, null, 0);
+    for (const cap of captions) {
+      const isPair = cap.per_image && cap.show.some((field) => !LIVE_CAPTION_FIELDS.has(field)) && frames.length >= 2 &&
+        (orientation === "horizontal" || orientation === "vertical");
+      if (isPair) {
+        this._addCaptionRegion(container, frames[0], cap, orientation, 0);
+        this._addCaptionRegion(container, frames[1], cap, orientation, 1);
+      } else {
+        this._addCaptionRegion(container, frames[0], cap, null, 0);
+      }
     }
+    this._layoutCaptionRegions(container);
+    this._fitCaptions();
+    this._scheduleCaptionClock();
 
     // Fade the new caption in alongside the image cross-fade. On the very
     // first frame (fade=false) just show it immediately.
@@ -1228,6 +1277,79 @@ function createAlbumSlideshowCardClass(Base) {
       });
     } else {
       container.style.opacity = "1";
+    }
+  }
+
+  _captionConfigs() {
+    return this._config?.captions ?? (this._config?.caption ? [this._config.caption] : []);
+  }
+
+  _scheduleCaptionClock() {
+    clearTimeout(this._captionClockTimer);
+    this._captionClockTimer = null;
+    const clocks = this._captionConfigs().filter((cap) =>
+      cap.show.some((field) => field === "current_date" || field === "current_time"));
+    if (!this.isConnected || !this._captionData || !clocks.length) return;
+    const interval = clocks.some((cap) => cap.show.includes("current_time") && cap.time_seconds) ? 1000 : 60000;
+    this._captionClockTimer = setTimeout(() => {
+      this._captionClockTimer = null;
+      if (this.isConnected && this._captionData) this._renderCaptions(this._captionData, false);
+    }, interval - (Date.now() % interval) + 20);
+  }
+
+  _fitCaptions() {
+    if (!this._captionConfigs().length || !this.shadowRoot) return;
+    for (const stack of this.shadowRoot.querySelectorAll(".cap-stack")) {
+      const boxes = [...stack.querySelectorAll(".cap-box")];
+      for (const box of boxes) box.style.fontSize = box._captionFontSize;
+      if (!stack.clientWidth || !stack.clientHeight) continue;
+      const sizes = boxes.map((box) => Number.parseFloat(getComputedStyle(box).fontSize));
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const scale = Math.min(stack.clientWidth / stack.scrollWidth, stack.clientHeight / stack.scrollHeight);
+        if (scale >= 1) break;
+        boxes.forEach((box, index) => {
+          sizes[index] = Math.max(1, sizes[index] * scale * 0.98);
+          box.style.fontSize = `${sizes[index]}px`;
+        });
+      }
+    }
+  }
+
+  _layoutCaptionRegions(container) {
+    const placements = [...container.children].map((region) => {
+      const width = region._captionOrientation === "horizontal" ? 0.5 : 1;
+      const height = region._captionOrientation === "vertical" ? 0.5 : 1;
+      const left = width === 0.5 ? region._captionHalf * width : 0;
+      const top = height === 0.5 ? region._captionHalf * height : 0;
+      return { region, left, right: left + width, top, bottom: top + height,
+        anchorX: left + region._captionColumn * width / 2,
+        anchorY: top + region._captionRow * height / 2 };
+    });
+    const space = (start, end, anchor, neighbors, centered) => {
+      let lower = start;
+      let upper = end;
+      for (const other of neighbors) {
+        if (other < anchor) lower = Math.max(lower, (other + anchor) / 2);
+        if (other > anchor) upper = Math.min(upper, (other + anchor) / 2);
+      }
+      if (centered) {
+        const radius = Math.min(anchor - lower, upper - anchor);
+        return [anchor - radius, anchor + radius];
+      }
+      return [lower, upper];
+    };
+    for (const current of placements) {
+      const neighbors = placements.filter((other) => other.left < current.right && other.right > current.left &&
+        other.top < current.bottom && other.bottom > current.top);
+      const [left, right] = space(current.left, current.right, current.anchorX,
+        neighbors.filter((other) => other.anchorY === current.anchorY).map((other) => other.anchorX),
+        current.region._captionColumn === 1);
+      const [top, bottom] = space(current.top, current.bottom, current.anchorY,
+        neighbors.map((other) => other.anchorY), current.region._captionRow === 1);
+      current.region.style.left = `${100 * left}%`;
+      current.region.style.right = `${100 * (1 - right)}%`;
+      current.region.style.top = `${100 * top}%`;
+      current.region.style.bottom = `${100 * (1 - bottom)}%`;
     }
   }
 
@@ -1250,23 +1372,67 @@ function createAlbumSlideshowCardClass(Base) {
         latitude: data.latitude ?? null,
         longitude: data.longitude ?? null,
         description: data.description ?? null,
+        ...Object.fromEntries(CAMERA_CAPTION_FIELDS.map((field) => [field, data[field] ?? null])),
       },
     ];
   }
 
-  _captionLines(frame, cap) {
+  _captionLines(frame, cap, now = new Date()) {
     const lines = [];
     for (const field of cap.show) {
       if (field === "date") {
         const txt = this._formatDate(frame.captured_at, cap.date_format);
         if (txt) lines.push(txt);
+      } else if (field === "current_date") {
+        lines.push(this._formatDate(now.toISOString(), cap.current_date_format ?? cap.date_format, this._hass?.config?.time_zone));
+      } else if (field === "current_time") {
+        lines.push(this._formatCurrentTime(now, cap));
+      } else if (field === "weather") {
+        const weather = this._weatherCaption(cap);
+        if (weather) lines.push(weather);
       } else if (field === "location") {
         if (frame.location) lines.push(String(frame.location));
       } else if (field === "description") {
         if (frame.description) lines.push(String(frame.description));
+      } else if (field === "camera") {
+        const make = typeof frame.camera_make === "string" ? frame.camera_make.trim() : "";
+        const model = typeof frame.camera_model === "string" ? frame.camera_model.trim() : "";
+        const camera = make && model.toLowerCase().startsWith(make.toLowerCase())
+          ? model : [make, model].filter(Boolean).join(" ");
+        if (camera) lines.push(camera);
+      } else if (field === "camera_make" || field === "camera_model") {
+        if (typeof frame[field] === "string" && frame[field].trim()) lines.push(frame[field].trim());
+      } else if (CAMERA_CAPTION_FIELDS.includes(field)) {
+        const value = frame[field];
+        if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) continue;
+        const formatted = new Intl.NumberFormat(this._locale(), { maximumFractionDigits: 3 }).format(value);
+        if (field === "focal_length_mm") lines.push(`${formatted} mm`);
+        else if (field === "aperture_f_number") lines.push(`f/${formatted}`);
+        else if (field === "iso") lines.push(`ISO ${Math.round(value)}`);
+        else if (field === "exposure_time_seconds") {
+          lines.push(value <= 0.5 ? `1/${Math.round(1 / value)} s` : `${formatted} s`);
+        }
       }
     }
     return lines;
+  }
+
+  _weatherCaption(cap) {
+    if (typeof cap.weather_entity !== "string" || !/^(weather|sensor)\.[a-z0-9_]+$/.test(cap.weather_entity)) return "";
+    const entity = this._hass?.states?.[cap.weather_entity];
+    if (!entity || !entity.state || ["unknown", "unavailable"].includes(entity.state)) return "";
+    const attributes = entity.attributes || {};
+    const isWeather = cap.weather_entity.startsWith("weather.");
+    const state = this._hass.formatEntityState
+      ? this._hass.formatEntityState(entity)
+      : isWeather ? humanizeOption(entity.state.replace("partlycloudy", "partly cloudy"))
+        : [entity.state, attributes.unit_of_measurement].filter(Boolean).join(" ");
+    if (!isWeather || typeof attributes.temperature !== "number" || !Number.isFinite(attributes.temperature)) return state;
+    const temperature = this._hass.formatEntityAttributeValue
+      ? this._hass.formatEntityAttributeValue(entity, "temperature")
+      : [new Intl.NumberFormat(this._locale(), { maximumFractionDigits: 1 }).format(attributes.temperature),
+        attributes.temperature_unit || this._hass.config?.unit_system?.temperature].filter(Boolean).join(" ");
+    return `${state}, ${temperature}`;
   }
 
   /** Build one positioned caption block. ``orientation`` is ``null`` for a
@@ -1276,26 +1442,6 @@ function createAlbumSlideshowCardClass(Base) {
     const lines = this._captionLines(frame, cap);
     if (lines.length === 0) return;
 
-    const region = document.createElement("div");
-    region.className = "cap-region";
-
-    // Region geometry: full frame, or one half of a pair.
-    let top = "0";
-    let right = "0";
-    let bottom = "0";
-    let left = "0";
-    if (orientation === "horizontal") {
-      if (half === 0) right = "50%";
-      else left = "50%";
-    } else if (orientation === "vertical") {
-      if (half === 0) bottom = "50%";
-      else top = "50%";
-    }
-    region.style.top = top;
-    region.style.right = right;
-    region.style.bottom = bottom;
-    region.style.left = left;
-
     // Anchor within the region from the 3x3 position grid.
     const pos = cap.position;
     const parts = pos === "center" ? ["center", "center"] : pos.split("-");
@@ -1303,14 +1449,48 @@ function createAlbumSlideshowCardClass(Base) {
     const h = parts[1] || "center";
     const justify = { left: "flex-start", center: "center", right: "flex-end" };
     const align = { top: "flex-start", center: "center", bottom: "flex-end" };
-    region.style.justifyContent = justify[h] || "flex-start";
-    region.style.alignItems = align[v] || "flex-end";
+    const row = { top: 0, center: 1, bottom: 2 }[v];
+    const column = { left: 0, center: 1, right: 2 }[h];
+    const anchorX = orientation === "horizontal" ? half / 2 + column / 4 : column / 2;
+    const anchorY = orientation === "vertical" ? half / 2 + row / 4 : row / 2;
+    let region = [...container.children].find((element) => element._captionAnchorX === anchorX &&
+      element._captionAnchorY === anchorY && (!orientation || !element._captionOrientation ||
+        (element._captionOrientation === orientation && element._captionHalf === half)));
+    if (!region) {
+      region = document.createElement("div");
+      region.className = "cap-region";
+      region._captionPosition = pos;
+      region._captionOrientation = orientation;
+      region._captionHalf = half;
+      region._captionRow = row;
+      region._captionColumn = column;
+      region._captionAnchorX = anchorX;
+      region._captionAnchorY = anchorY;
+      region.style.justifyContent = justify[h] || "flex-start";
+      region.style.alignItems = align[v] || "flex-end";
+      const stack = document.createElement("div");
+      stack.className = "cap-stack";
+      stack.style.alignItems = justify[h] || "flex-start";
+      region._captionStack = stack;
+      region.appendChild(stack);
+      container.appendChild(region);
+    }
+    if (!region._captionOrientation && orientation) {
+      region._captionOrientation = orientation;
+      region._captionHalf = half;
+      region._captionRow = row;
+      region._captionColumn = column;
+      region.style.justifyContent = justify[h];
+      region.style.alignItems = align[v];
+      region._captionStack.style.alignItems = justify[h];
+    }
 
     const box = document.createElement("div");
     box.className = "cap-box";
     if (cap.shadow) box.classList.add("cap-shadow");
     box.style.color = cap.color;
     box.style.fontSize = cap.font_size;
+    box._captionFontSize = cap.font_size;
     box.style.fontWeight = CAPTION_WEIGHT_MAP[cap.font_weight] || 500;
     box.style.textAlign = h === "center" ? "center" : h;
 
@@ -1320,8 +1500,7 @@ function createAlbumSlideshowCardClass(Base) {
       el.textContent = line;
       box.appendChild(el);
     }
-    region.appendChild(box);
-    container.appendChild(region);
+    region._captionStack.appendChild(box);
   }
 
   _locale() {
@@ -1332,7 +1511,23 @@ function createAlbumSlideshowCardClass(Base) {
     );
   }
 
-  _formatDate(iso, fmt) {
+  _formatCurrentTime(now, cap) {
+    const format = cap.time_format === "auto" || !cap.time_format
+      ? this._hass?.locale?.time_format : cap.time_format;
+    const options = { hour: "numeric", minute: "2-digit", timeZone: this._hass?.config?.time_zone };
+    if (["12h", "am_pm"].includes(format)) options.hourCycle = "h12";
+    if (["24h", "24"].includes(format)) { options.hourCycle = "h23"; options.hour = "2-digit"; }
+    if (cap.time_seconds) options.second = "2-digit";
+    const locale = format === "system" && typeof navigator !== "undefined" ? navigator.language : this._locale();
+    try {
+      return new Intl.DateTimeFormat(locale, options).format(now);
+    } catch (_) {
+      delete options.timeZone;
+      return new Intl.DateTimeFormat(undefined, options).format(now);
+    }
+  }
+
+  _formatDate(iso, fmt, timeZone) {
     if (!iso) return "";
     const d = new Date(iso);
     if (isNaN(d.getTime())) return "";
@@ -1341,13 +1536,13 @@ function createAlbumSlideshowCardClass(Base) {
     const preset = DATE_FORMAT_PRESETS[fmt];
     if (preset) {
       try {
-        return new Intl.DateTimeFormat(locale, preset).format(d);
+        return new Intl.DateTimeFormat(locale, { ...preset, timeZone }).format(d);
       } catch (_) {
         return d.toLocaleDateString();
       }
     }
     // Anything else is treated as a custom token string.
-    return this._formatTokens(d, String(fmt));
+    return this._formatTokens(d, String(fmt), timeZone);
   }
 
   _relativeTime(d) {
@@ -1391,29 +1586,40 @@ function createAlbumSlideshowCardClass(Base) {
     }
   }
 
-  _formatTokens(d, fmt) {
+  _formatTokens(d, fmt, timeZone) {
     const locale = this._locale();
     const pad = (n) => String(n).padStart(2, "0");
     const part = (opts) => {
       try {
-        return new Intl.DateTimeFormat(locale, opts).format(d);
+        return new Intl.DateTimeFormat(locale, { ...opts, timeZone }).format(d);
       } catch (_) {
         return "";
       }
     };
+    let calendar = { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate(), hour: d.getHours(), minute: d.getMinutes() };
+    if (timeZone) {
+      try {
+        const parts = new Intl.DateTimeFormat("en-US-u-nu-latn", {
+          year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric",
+          hourCycle: "h23", timeZone,
+        }).formatToParts(d);
+        calendar = Object.fromEntries(parts.filter((value) => value.type !== "literal")
+          .map((value) => [value.type, Number(value.value)]));
+      } catch (_) {}
+    }
     const map = {
-      YYYY: d.getFullYear(),
-      YY: pad(d.getFullYear() % 100),
+      YYYY: calendar.year,
+      YY: pad(calendar.year % 100),
       MMMM: part({ month: "long" }),
       MMM: part({ month: "short" }),
-      MM: pad(d.getMonth() + 1),
-      M: d.getMonth() + 1,
-      DD: pad(d.getDate()),
-      D: d.getDate(),
+      MM: pad(calendar.month),
+      M: calendar.month,
+      DD: pad(calendar.day),
+      D: calendar.day,
       dddd: part({ weekday: "long" }),
       ddd: part({ weekday: "short" }),
-      HH: pad(d.getHours()),
-      mm: pad(d.getMinutes()),
+      HH: pad(calendar.hour),
+      mm: pad(calendar.minute),
       // Lets relative time be mixed into a format string, e.g. "DD MMMM YYYY - REL".
       REL: this._relativeTime(d),
     };
@@ -1498,9 +1704,19 @@ const TAP_OPTIONS = [
 ];
 
 const CAPTION_SHOW_OPTIONS = [
-  { value: "date", label: "Date" },
+  { value: "date", label: "Photo date" },
   { value: "location", label: "Location" },
   { value: "description", label: "Description" },
+  { value: "camera", label: "Camera (make and model)" },
+  { value: "camera_make", label: "Camera make" },
+  { value: "camera_model", label: "Camera model" },
+  { value: "focal_length_mm", label: "Focal length" },
+  { value: "aperture_f_number", label: "Aperture" },
+  { value: "iso", label: "ISO" },
+  { value: "exposure_time_seconds", label: "Exposure time" },
+  { value: "current_date", label: "Today's date" },
+  { value: "current_time", label: "Current time" },
+  { value: "weather", label: "Weather" },
 ];
 
 const CAPTION_POSITION_OPTIONS = [
@@ -1554,6 +1770,8 @@ const CAPTION_DEFAULTS = {
   position: "bottom-left",
   per_image: true,
   date_format: "medium",
+  time_format: "auto",
+  time_seconds: false,
   color: "#ffffff",
   font_size: "14px",
   font_weight: "medium",
@@ -1568,6 +1786,8 @@ const CAPTION_DEFAULTS = {
 const LIVE_FIELDS = [
   "paused",
   "date_filter",
+  "custom_lookback_days",
+  "shuffle_age_bias",
   "missing_date_mode",
   "portrait_mode",
   "order_mode",
@@ -1580,6 +1800,8 @@ const LIVE_FIELDS = [
 const LIVE_SUFFIX = {
   paused: "_paused",
   date_filter: "_date_filter",
+  custom_lookback_days: "_custom_lookback_days",
+  shuffle_age_bias: "_shuffle_age_bias",
   missing_date_mode: "_missing_date_mode",
   portrait_mode: "_portrait_mode",
   order_mode: "_order_mode",
@@ -1595,6 +1817,8 @@ const LIVE_SUFFIX = {
 const LIVE_LABELS = {
   live_paused: "Pause slideshow",
   live_date_filter: "Date filter",
+  live_custom_lookback_days: "Custom lookback (days)",
+  live_shuffle_age_bias: "Shuffle age bias (older - / newer +)",
   live_missing_date_mode: "Missing capture date",
   live_portrait_mode: "Orientation mismatch mode",
   live_order_mode: "Order mode",
@@ -1741,7 +1965,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
       min: a.min != null ? a.min : fallback.min,
       max: a.max != null ? a.max : fallback.max,
       step: a.step != null ? a.step : fallback.step,
-      mode: "box",
+      mode: fallback.mode || "box",
       unit_of_measurement: fallback.unit,
     };
   }
@@ -1768,6 +1992,22 @@ function createAlbumSlideshowCardEditorClass(Base) {
           },
         });
       }
+    }
+    if (s.custom_lookback_days && this._hass?.states[s.date_filter]?.state === "custom_days") {
+      items.push({
+        name: "live_custom_lookback_days",
+        selector: { number: this._liveNumberConfig(s.custom_lookback_days, {
+          min: 1, max: 36500, step: 1, unit: "d",
+        }) },
+      });
+    }
+    if (s.shuffle_age_bias && this._hass?.states[s.order_mode]?.state === "random") {
+      items.push({
+        name: "live_shuffle_age_bias",
+        selector: { number: this._liveNumberConfig(s.shuffle_age_bias, {
+          min: -100, max: 100, step: 1, mode: "slider",
+        }) },
+      });
     }
     if (s.slide_interval) {
       items.push({
@@ -1905,56 +2145,6 @@ function createAlbumSlideshowCardEditorClass(Base) {
           },
         ],
       },
-      {
-        type: "expandable",
-        title: "Caption (date, location & description)",
-        icon: "mdi:format-text",
-        schema: [
-          { name: "caption_enabled", selector: { boolean: {} } },
-          {
-            name: "caption_show",
-            selector: {
-              select: {
-                multiple: true,
-                mode: "list",
-                options: CAPTION_SHOW_OPTIONS,
-              },
-            },
-          },
-          {
-            name: "caption_position",
-            selector: {
-              select: { mode: "dropdown", options: CAPTION_POSITION_OPTIONS },
-            },
-          },
-          {
-            name: "caption_date_format",
-            selector: {
-              select: {
-                mode: "dropdown",
-                custom_value: true,
-                options: CAPTION_DATE_FORMAT_OPTIONS,
-              },
-            },
-          },
-          { name: "caption_per_image", selector: { boolean: {} } },
-          {
-            type: "grid",
-            name: "",
-            schema: [
-              { name: "caption_color", selector: { text: {} } },
-              { name: "caption_font_size", selector: { text: {} } },
-            ],
-          },
-          {
-            name: "caption_font_weight",
-            selector: {
-              select: { mode: "dropdown", options: CAPTION_WEIGHT_OPTIONS },
-            },
-          },
-          { name: "caption_shadow", selector: { boolean: {} } },
-        ],
-      },
     ];
 
     if (this._hasLiveControls()) {
@@ -1986,15 +2176,13 @@ function createAlbumSlideshowCardEditorClass(Base) {
         c.tap_pause_seconds != null
           ? Number(c.tap_pause_seconds)
           : DEFAULTS.tap_pause_seconds,
-      ...this._captionData(),
       ...this._liveDataFromStates(),
     };
   }
 
   /** Flatten the nested ``caption`` config into the fields ha-form binds. */
-  _captionData() {
-    const cap = this._config && this._config.caption;
-    const enabled = !!cap && cap !== false;
+  _captionData(cap = this._editorCaptions()[0]) {
+    const enabled = !!cap && cap !== false && cap.enabled !== false;
     const c = cap && typeof cap === "object" ? cap : {};
     let show = c.show;
     if (typeof show === "string") show = show.split(/[,\s]+/).filter(Boolean);
@@ -2005,11 +2193,322 @@ function createAlbumSlideshowCardEditorClass(Base) {
       caption_position: c.position || CAPTION_DEFAULTS.position,
       caption_per_image: c.per_image !== false,
       caption_date_format: c.date_format || CAPTION_DEFAULTS.date_format,
+      caption_current_date_format: c.current_date_format || c.date_format || CAPTION_DEFAULTS.date_format,
+      caption_time_format: c.time_format || CAPTION_DEFAULTS.time_format,
+      caption_time_seconds: c.time_seconds === true,
+      caption_weather_entity: c.weather_entity || "",
       caption_color: c.color || CAPTION_DEFAULTS.color,
       caption_font_size: c.font_size || CAPTION_DEFAULTS.font_size,
       caption_font_weight: c.font_weight || CAPTION_DEFAULTS.font_weight,
       caption_shadow: c.shadow !== false,
     };
+  }
+
+  _editorCaptions() {
+    const source = this._config.captions ?? (this._config.caption ? [this._config.caption] : []);
+    return Array.isArray(source) ? source.map((caption) => ({
+      ...(caption && typeof caption === "object" ? caption : { enabled: caption !== false }),
+    })) : [];
+  }
+
+  _captionSchema(caption = this._editorCaptions()[0]) {
+    const data = this._captionData(caption);
+    const schema = [
+      { name: "caption_enabled", selector: { boolean: {} } },
+      { name: "caption_position", selector: { select: { mode: "dropdown", options: CAPTION_POSITION_OPTIONS } } },
+      { name: "caption_show", selector: { select: { multiple: true, reorder: true, mode: "dropdown", options: CAPTION_SHOW_OPTIONS } } },
+    ];
+    if (data.caption_show.includes("weather")) {
+      schema.push({ name: "caption_weather_entity", required: true,
+        selector: { entity: { filter: [{ domain: ["weather", "sensor"] }] } } });
+    }
+    if (data.caption_show.includes("date")) {
+      schema.push({ name: "caption_date_format", selector: { select: {
+        mode: "dropdown", custom_value: true, options: CAPTION_DATE_FORMAT_OPTIONS,
+      } } });
+    }
+    if (data.caption_show.includes("current_date")) {
+      schema.push({ name: "caption_current_date_format", selector: { select: {
+        mode: "dropdown", custom_value: true, options: CAPTION_DATE_FORMAT_OPTIONS,
+      } } });
+    }
+    if (data.caption_show.includes("current_time")) {
+      schema.push(
+        { name: "caption_time_format", selector: { select: { mode: "dropdown", options: [
+          { value: "auto", label: "Home Assistant preference" },
+          { value: "12h", label: "12-hour" }, { value: "24h", label: "24-hour" },
+        ] } } },
+        { name: "caption_time_seconds", selector: { boolean: {} } },
+      );
+    }
+    if (data.caption_show.some((field) => !LIVE_CAPTION_FIELDS.has(field))) {
+      schema.push({ name: "caption_per_image", selector: { boolean: {} } });
+    }
+    schema.push(
+      { type: "grid", name: "", schema: [
+        { name: "caption_color", selector: { text: {} } },
+        { name: "caption_font_size", selector: { text: {} } },
+      ] },
+      { name: "caption_font_weight", selector: { select: { mode: "dropdown", options: CAPTION_WEIGHT_OPTIONS } } },
+      { name: "caption_shadow", selector: { boolean: {} } },
+    );
+    return schema;
+  }
+
+  _saveCaptions(captions) {
+    const config = { ...this._config };
+    const useList = Array.isArray(config.captions) || captions.length > 1;
+    delete config.caption;
+    delete config.captions;
+    if (captions.length) {
+      if (useList) config.captions = captions;
+      else config.caption = captions[0];
+    }
+    this._config = config;
+    this._renderCaptionEditors();
+    this.dispatchEvent(new CustomEvent("config-changed", {
+      detail: { config }, bubbles: true, composed: true,
+    }));
+  }
+
+  _nextCaptionPosition(captions) {
+    const used = new Set(captions.map((caption) => caption.position || CAPTION_DEFAULTS.position));
+    return ["bottom-left", "top-left", "bottom-right", "top-right", "bottom-center", "top-center", "center-left", "center-right", "center"]
+      .find((position) => !used.has(position)) || CAPTION_DEFAULTS.position;
+  }
+
+  _addCaption(copyIndex) {
+    const captions = this._editorCaptions();
+    const original = Number.isInteger(copyIndex) ? captions[copyIndex] : null;
+    captions.push({
+      ...(original || {}),
+      show: [...this._captionData(original || {}).caption_show],
+      position: this._nextCaptionPosition(captions),
+    });
+    this._openCaptionIndex = captions.length - 1;
+    this._saveCaptions(captions);
+  }
+
+  _removeCaption(index) {
+    const captions = this._editorCaptions();
+    captions.splice(index, 1);
+    this._openCaptionIndex = Math.min(index, captions.length - 1);
+    this._saveCaptions(captions);
+  }
+
+  _captionChanged(index, event) {
+    event.stopPropagation();
+    const captions = this._editorCaptions();
+    if (!captions[index]) return;
+    const data = { ...this._captionData(captions[index]), ...event.detail?.value };
+    let show = data.caption_show;
+    if (!Array.isArray(show)) show = typeof show === "string" ? show.split(/[,\s]+/) : [];
+    const caption = { show: [...new Set(show.filter((field) => CAPTION_FIELDS.includes(field)))] };
+    if (data.caption_enabled === false) caption.enabled = false;
+    for (const field of ["position", "date_format", "time_format", "color", "font_size", "font_weight"]) {
+      const value = String(data[`caption_${field}`] || CAPTION_DEFAULTS[field]).trim();
+      if (value && value !== CAPTION_DEFAULTS[field]) caption[field] = value;
+    }
+    if (caption.show.includes("current_date") || captions[index].current_date_format != null) {
+      const format = String(data.caption_current_date_format || CAPTION_DEFAULTS.date_format).trim();
+      if (format !== (caption.date_format || CAPTION_DEFAULTS.date_format)) caption.current_date_format = format;
+    }
+    if (data.caption_per_image === false) caption.per_image = false;
+    if (data.caption_shadow === false) caption.shadow = false;
+    if (data.caption_time_seconds === true) caption.time_seconds = true;
+    if (typeof data.caption_weather_entity === "string" && data.caption_weather_entity.trim()) {
+      caption.weather_entity = data.caption_weather_entity.trim();
+    }
+    captions[index] = caption;
+    this._saveCaptions(captions);
+  }
+
+  _captionButton(icon, label, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "caption-tool";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    const symbol = document.createElement("ha-icon");
+    symbol.setAttribute("icon", icon);
+    button.append(symbol);
+    button.addEventListener("click", action);
+    return button;
+  }
+
+  _moveCaptionContent(index, event) {
+    event.stopPropagation();
+    const { oldIndex, newIndex } = event.detail || {};
+    const show = [...this._captionData(this._editorCaptions()[index]).caption_show];
+    if (!Number.isInteger(oldIndex) || !Number.isInteger(newIndex) || oldIndex === newIndex ||
+      oldIndex < 0 || oldIndex >= show.length || newIndex < 0 || newIndex >= show.length) return;
+    const [field] = show.splice(oldIndex, 1);
+    show.splice(newIndex, 0, field);
+    this._captionChanged(index, { stopPropagation() {}, detail: { value: { caption_show: show } } });
+  }
+
+  _createCaptionContentPicker(index) {
+    const content = document.createElement("div");
+    content.className = "caption-content-selector";
+    const label = document.createElement("span");
+    label.className = "caption-content-label";
+    label.id = `caption-content-label-${index}`;
+    label.textContent = "Content";
+    const picker = document.createElement("ha-generic-picker");
+    picker.label = "Content";
+    picker.searchLabel = "Search content";
+    picker.allowCustomValue = false;
+    picker.value = "";
+    picker.setAttribute("no-sort", "");
+    const field = document.createElement("div");
+    field.slot = "field";
+    field.className = "caption-content-field";
+    field.setAttribute("role", "group");
+    field.setAttribute("aria-labelledby", label.id);
+    const sortable = document.createElement("ha-sortable");
+    sortable.setAttribute("no-style", "");
+    sortable.setAttribute("handle-selector", "button.primary.action");
+    sortable.setAttribute("filter", ".caption-content-add");
+    sortable.addEventListener("item-moved", (event) => this._moveCaptionContent(index, event));
+    const chips = document.createElement("ha-chip-set");
+    const add = document.createElement("ha-assist-chip");
+    add.className = "caption-content-add";
+    add.label = "Add";
+    const icon = document.createElement("ha-icon");
+    icon.slot = "icon";
+    icon.setAttribute("icon", "mdi:plus");
+    add.append(icon);
+    add.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await picker.updateComplete;
+      if (!add.disabled) picker.open();
+    });
+    picker.addEventListener("value-changed", (event) => {
+      event.stopPropagation();
+      const selected = event.detail?.value;
+      const show = this._captionData(this._editorCaptions()[index]).caption_show;
+      if (!CAPTION_FIELDS.includes(selected) || show.includes(selected)) return;
+      this._captionChanged(index, { stopPropagation() {}, detail: { value: { caption_show: [...show, selected] } } });
+      picker.value = "";
+    });
+    chips.append(add);
+    sortable.append(chips);
+    field.append(sortable);
+    picker.append(field);
+    content.append(label, picker);
+    return content;
+  }
+
+  _updateCaptionContentPicker(content, index, data, selector) {
+    const picker = content.querySelector("ha-generic-picker");
+    const chips = content.querySelector("ha-chip-set");
+    const add = content.querySelector(".caption-content-add");
+    const show = data.caption_show.filter((field) => CAPTION_FIELDS.includes(field));
+    const items = selector.options.filter((option) => !show.includes(option.value))
+      .map((option) => ({ id: option.value, primary: option.label, sorting_label: option.label }));
+    picker.hass = this._hass;
+    picker.getItems = () => items;
+    add.disabled = items.length === 0;
+    content.querySelector("ha-sortable").disabled = !selector.reorder;
+    const signature = JSON.stringify(show);
+    if (content._captionContentSignature === signature) return;
+    content._captionContentSignature = signature;
+    const selected = show.map((value) => {
+      const label = selector.options.find((option) => option.value === value)?.label || value;
+      const chip = document.createElement("ha-input-chip");
+      chip.label = label;
+      chip.title = label;
+      chip.selected = true;
+      chip.setAttribute("data-field", value);
+      const icon = document.createElement("ha-icon");
+      icon.slot = "icon";
+      icon.setAttribute("icon", "mdi:drag-horizontal-variant");
+      chip.append(icon, document.createTextNode(label));
+      chip.addEventListener("click", (event) => event.stopPropagation());
+      chip.addEventListener("remove", (event) => {
+        event.stopPropagation();
+        const remaining = this._captionData(this._editorCaptions()[index]).caption_show.filter((field) => field !== value);
+        this._captionChanged(index, { stopPropagation() {}, detail: { value: { caption_show: remaining } } });
+      });
+      return chip;
+    });
+    chips.replaceChildren(...selected, add);
+  }
+
+  _renderCaptionEditors() {
+    const list = this.shadowRoot?.querySelector(".caption-list");
+    if (!list) return;
+    const captions = this._editorCaptions();
+    if (list.children.length !== captions.length) {
+      list.replaceChildren();
+      captions.forEach((_caption, index) => {
+        const item = document.createElement("div");
+        item.className = "caption-item";
+        const details = document.createElement("details");
+        details.open = index === this._openCaptionIndex || captions.length === 1;
+        const summary = document.createElement("summary");
+        const chevron = document.createElement("ha-icon");
+        chevron.className = "caption-chevron";
+        chevron.setAttribute("icon", "mdi:chevron-right");
+        chevron.setAttribute("aria-hidden", "true");
+        const heading = document.createElement("span");
+        heading.className = "caption-summary";
+        const title = document.createElement("span");
+        title.className = "caption-title";
+        const meta = document.createElement("span");
+        meta.className = "caption-meta";
+        heading.append(title, meta);
+        summary.append(chevron, heading);
+        const body = document.createElement("div");
+        body.className = "caption-body";
+        const controls = document.createElement("ha-form");
+        controls.className = "caption-controls";
+        const options = document.createElement("ha-form");
+        options.className = "caption-options";
+        for (const form of [controls, options]) {
+          form.computeLabel = this._computeLabel;
+          form.computeHelper = this._computeHelper;
+          form.addEventListener("value-changed", (event) => this._captionChanged(index, event));
+        }
+        body.append(controls, this._createCaptionContentPicker(index), options);
+        details.append(summary, body);
+        const tools = document.createElement("div");
+        tools.className = "caption-tools";
+        tools.append(
+          this._captionButton("mdi:content-copy", `Duplicate caption ${index + 1}`, () => this._addCaption(index)),
+          this._captionButton("mdi:delete-outline", `Remove caption ${index + 1}`, () => this._removeCaption(index)),
+        );
+        item.append(details, tools);
+        list.append(item);
+      });
+    }
+    captions.forEach((caption, index) => {
+      const item = list.children[index];
+      const data = this._captionData(caption);
+      const position = CAPTION_POSITION_OPTIONS.find((option) => option.value === data.caption_position)?.label || data.caption_position;
+      const fields = data.caption_show.map((field) => CAPTION_SHOW_OPTIONS.find((option) => option.value === field)?.label)
+        .filter(Boolean).join(", ") || "Empty caption";
+      const title = `${position}${data.caption_enabled ? "" : " (off)"}`;
+      item.querySelector(".caption-title").textContent = title;
+      item.querySelector(".caption-title").title = title;
+      item.querySelector(".caption-meta").textContent = fields;
+      item.querySelector(".caption-meta").title = fields;
+      item.querySelector("summary").setAttribute("aria-label", `Caption ${index + 1}: ${title}. ${fields}`);
+      item.classList.toggle("caption-disabled", !data.caption_enabled);
+      const schema = this._captionSchema(caption);
+      const contentIndex = schema.findIndex((field) => field.name === "caption_show");
+      for (const [className, fields] of [
+        [".caption-controls", schema.slice(0, contentIndex)],
+        [".caption-options", schema.slice(contentIndex + 1)],
+      ]) {
+        const form = item.querySelector(className);
+        form.hass = this._hass;
+        form.schema = fields;
+        form.data = data;
+      }
+      this._updateCaptionContentPicker(item.querySelector(".caption-content-selector"), index, data,
+        schema[contentIndex].selector.select);
+    });
   }
 
   /** Read the current value of each surfaced integration entity. */
@@ -2028,7 +2527,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
         out[`live_${f}`] = e ? e.state : "";
       }
     }
-    for (const f of ["slide_interval", "pair_divider_px", "pair_min_gap_percent"]) {
+    for (const f of ["slide_interval", "pair_divider_px", "pair_min_gap_percent", "custom_lookback_days", "shuffle_age_bias"]) {
       if (s[f]) {
         const e = st(s[f]);
         out[`live_${f}`] = e ? Number(e.state) : null;
@@ -2057,7 +2556,11 @@ function createAlbumSlideshowCardEditorClass(Base) {
       caption_show: "Show",
       caption_position: "Position",
       caption_per_image: "Per-image captions on pairs",
-      caption_date_format: "Date format",
+      caption_date_format: "Photo date format",
+      caption_current_date_format: "Today's date format",
+      caption_time_format: "Time format",
+      caption_time_seconds: "Show seconds",
+      caption_weather_entity: "Weather source",
       caption_color: "Text color",
       caption_font_size: "Font size",
       caption_font_weight: "Font weight",
@@ -2075,10 +2578,12 @@ function createAlbumSlideshowCardEditorClass(Base) {
         "How long the card freezes its slide after a tap. 0 disables it.",
       caption_date_format:
         "Pick a preset or type a custom format (YYYY, MMMM, MMM, MM, DD, D, REL for relative time).",
+      caption_current_date_format:
+        "Pick a preset or type a custom format (YYYY, MMMM, MMM, MM, DD, D, REL for relative time).",
       caption_show:
-        "Description comes from the photo's EXIF/IPTC/XMP caption and is only available with the local-folder provider.",
+        "Available fields depend on the photo source. Missing values are omitted.",
       caption_per_image:
-        "When a portrait pair is shown, caption each photo with its own date, location and description.",
+        "Use each photo's own metadata on paired slides.",
       caption_color: "CSS color, e.g. #ffffff or white.",
       caption_font_size: "CSS size, e.g. 14px, 1.1em.",
       live_paused:
@@ -2124,10 +2629,50 @@ function createAlbumSlideshowCardEditorClass(Base) {
           background: var(--primary-color); color: var(--text-primary-color, #fff);
         }
         .act:hover { opacity: 0.9; }
+        .caption-editors { display: block; }
+        .caption-content { padding: 4px 12px 12px; }
+        .caption-list { display: flex; flex-direction: column; gap: 12px; }
+        .caption-item { display: grid; min-width: 0; border: 1px solid var(--divider-color, #e0e0e0); border-radius: 8px; background: var(--card-background-color, #fff); }
+        .caption-item details { grid-area: 1 / 1; min-width: 0; }
+        .caption-item summary { display: flex; align-items: center; gap: 8px; box-sizing: border-box; padding: 12px 100px 12px 12px; min-height: 70px; border-radius: 7px; list-style: none; cursor: pointer; background: var(--secondary-background-color, #f5f5f5); }
+        .caption-item summary::-webkit-details-marker { display: none; }
+        .caption-item summary:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
+        .caption-item details[open] > summary { border-radius: 7px 7px 0 0; border-bottom: 1px solid var(--divider-color, #e0e0e0); }
+        .caption-chevron { flex: 0 0 18px; --mdc-icon-size: 18px; color: var(--secondary-text-color); }
+        .caption-item details[open] .caption-chevron { transform: rotate(90deg); }
+        .caption-summary { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 3px; }
+        .caption-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; font-weight: 500; line-height: 1.35; }
+        .caption-meta { color: var(--secondary-text-color); font-size: 12px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .caption-disabled .caption-title { color: var(--secondary-text-color); }
+        .caption-body { padding: 12px; display: flex; flex-direction: column; gap: 20px; }
+        .caption-body ha-form { min-width: 0; }
+        .caption-content-selector { min-width: 0; }
+        .caption-content-label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 500; }
+        .caption-content-selector ha-generic-picker { display: block; width: 100%; }
+        .caption-content-field { position: relative; background: var(--mdc-text-field-fill-color, #f5f5f5); border-radius: 4px 4px 0 0; border-bottom: 1px solid var(--mdc-text-field-idle-line-color, #9e9e9e); }
+        .caption-content-field:focus-within { border-bottom-color: var(--primary-color); box-shadow: 0 1px 0 var(--primary-color); }
+        .caption-content-field ha-chip-set { padding: 10px 12px; min-height: 54px; box-sizing: border-box; }
+        .caption-content-field ha-input-chip { max-width: 100%; }
+        .caption-content-field ha-icon { --mdc-icon-size: 18px; }
+        .caption-content-add { order: 1; }
+        .caption-content-field .sortable-fallback { display: none; opacity: 0; }
+        .caption-content-field .sortable-ghost { opacity: 0.4; }
+        .caption-content-field .sortable-drag { cursor: grabbing; }
+        .caption-tools { grid-area: 1 / 1; align-self: start; justify-self: end; z-index: 1; display: flex; gap: 2px; padding: 10px 8px; }
+        .caption-tool { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex-shrink: 0; width: 36px; height: 36px; padding: 6px; border: 0; border-radius: 4px; background: transparent; color: var(--secondary-text-color, var(--primary-text-color)); cursor: pointer; }
+        .caption-tool:hover { background: var(--divider-color, #e0e0e0); color: var(--primary-text-color); }
+        .caption-tool:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+        .caption-add { width: 100%; min-height: 40px; gap: 8px; margin-top: 12px; border: 1px dashed var(--divider-color, #e0e0e0); border-radius: 6px; color: var(--primary-color); }
+        .caption-tool ha-icon { --mdc-icon-size: 20px; }
       </style>
       <div class="card-config">
         <div class="info-slot"></div>
         <ha-form></ha-form>
+        <ha-expansion-panel class="caption-editors" outlined>
+          <ha-icon slot="leading-icon" icon="mdi:format-text"></ha-icon>
+          <div slot="header" role="heading" aria-level="3">Captions</div>
+          <div class="caption-content"><div class="caption-list"></div></div>
+        </ha-expansion-panel>
         <div class="actions" hidden></div>
         <div class="photo-controls"></div>
       </div>
@@ -2136,6 +2681,10 @@ function createAlbumSlideshowCardEditorClass(Base) {
     form.computeLabel = this._computeLabel;
     form.computeHelper = this._computeHelper;
     form.addEventListener("value-changed", (ev) => this._valueChanged(ev));
+    const addCaption = this._captionButton("mdi:plus", "Add caption", () => this._addCaption());
+    addCaption.classList.add("caption-add");
+    addCaption.append(document.createTextNode("Add caption"));
+    this.shadowRoot.querySelector(".caption-content").append(addCaption);
     this._photoControls = new PhotoControls(
       this.shadowRoot.querySelector(".photo-controls"), () => this._hass,
     );
@@ -2153,6 +2702,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
     form.hass = this._hass;
     form.schema = this._schema();
     form.data = this._data();
+    this._renderCaptionEditors();
 
     const count = this._countSlideshowCameras();
     this._lastEntityCount = count;
@@ -2246,6 +2796,8 @@ function createAlbumSlideshowCardEditorClass(Base) {
       });
     } else if (
       field === "slide_interval" ||
+      field === "custom_lookback_days" ||
+      field === "shuffle_age_bias" ||
       field === "pair_divider_px" ||
       field === "pair_min_gap_percent"
     ) {
@@ -2316,32 +2868,8 @@ function createAlbumSlideshowCardEditorClass(Base) {
       n.tap_pause_seconds = tps;
     }
 
-    // Caption: only emit a ``caption`` block when enabled and at least one
-    // field is selected. Non-default sub-settings are written; defaults are
-    // omitted to keep the YAML lean.
-    if (data.caption_enabled) {
-      let show = data.caption_show;
-      if (!Array.isArray(show)) show = show ? [show] : [];
-      show = show.filter(
-        (v) => v === "date" || v === "location" || v === "description",
-      );
-      if (show.length > 0) {
-        const cap = { show };
-        const pos = data.caption_position || CAPTION_DEFAULTS.position;
-        if (pos !== CAPTION_DEFAULTS.position) cap.position = pos;
-        if (data.caption_per_image === false) cap.per_image = false;
-        const df = data.caption_date_format || CAPTION_DEFAULTS.date_format;
-        if (df !== CAPTION_DEFAULTS.date_format) cap.date_format = df;
-        const col = (data.caption_color || "").trim();
-        if (col && col.toLowerCase() !== CAPTION_DEFAULTS.color) cap.color = col;
-        const fs = (data.caption_font_size || "").trim();
-        if (fs && fs !== CAPTION_DEFAULTS.font_size) cap.font_size = fs;
-        const fw = data.caption_font_weight || CAPTION_DEFAULTS.font_weight;
-        if (fw !== CAPTION_DEFAULTS.font_weight) cap.font_weight = fw;
-        if (data.caption_shadow === false) cap.shadow = false;
-        n.caption = cap;
-      }
-    }
+    if (Array.isArray(this._config.captions)) n.captions = this._config.captions;
+    else if (this._config.caption != null) n.caption = this._config.caption;
 
     this._config = n;
     this.dispatchEvent(

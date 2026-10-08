@@ -10,19 +10,23 @@ images, not videos. Install the integration first using the
 
 | Provider | Best for | Date filter / ordering | Location | Description caption |
 |----------|----------|:---:|:---:|:---:|
-| [Google Photos](#google-photos) | A shared album link | Yes (dates only) | No | No |
+| [Google Photos](#google-photos) | A shared album link | Yes | Separate opt-in | Optional enrichment |
 | [Immich](#immich) | An Immich server (album, person, favorites, all, search) | Yes | Yes | Yes |
 | [PhotoPrism](#photoprism) | A PhotoPrism server (album, person, favorites, all, search) | Yes | Yes | Yes |
 | [iCloud](#icloud-shared-album) | An iCloud Shared Album public link | Yes | No | Yes |
 | [Synology](#synology-photos) | A Synology Photos library (favorites, albums, people, places, tags, subjects) | Yes | Yes | Yes |
+| [UGREEN](#ugreen-nas-ugos-photos) | A UGREEN NAS running UGOS Photos (experimental) | Yes | Yes | No |
 | [Nextcloud (folder)](#authenticated-webdav-folder) | Any folder in your Nextcloud files (WebDAV, app password) | Yes | Yes | Yes |
 | [Nextcloud (public link)](#public-album-link) | A public Nextcloud Photos album share link (no login) | Yes | Yes | Yes |
 | [Ente Photos](#ente-photos) | A public Ente album link (no login, end-to-end encrypted) | Yes | Yes | Yes |
 | [Local Folder](#local-folder-or-nas) | Files on the HA host / NAS | Yes | Yes | Yes |
 | [Media Source](#media-source) | Any HA media source with no API (local media, Jellyfin, ...) | No | No | No |
 
-> Media Source and Google Photos serve photos as URLs, so there is no EXIF
-> to read. For full metadata (dates, location, description), use **Local
+> Media Source and Google's resized display images do not provide EXIF for
+> this integration to read. Google descriptions and camera fields can be
+> fetched separately through experimental enrichment; original-photo GPS
+> requires the separate [location opt-in](#google-location-and-privacy). For full metadata
+> (dates, location, description), use **Local
 > Folder** for local/NAS files or the **Immich** / **PhotoPrism** provider for
 > a self-hosted photo server. The Media Source route also works with those but
 > without metadata, so prefer the direct provider when you have one.
@@ -33,6 +37,64 @@ images, not videos. Install the integration first using the
 2. Copy the shared link such as `https://photos.app.goo.gl/...`.
 3. Add the integration.
 4. Paste the link.
+
+### Experimental Photo Metadata
+
+Google Photos metadata enrichment is on by default, including existing entries
+without a saved preference. A previously saved off setting stays off. Use
+**Configure > Fetch photo metadata (experimental)** to turn it on or off per album.
+The slideshow loads as usual while a separate worker reads photo descriptions,
+camera make/model, focal length, aperture, ISO, and exposure time from the
+public album. Descriptions use the existing caption option on the card.
+
+Results are cached per photo and survive restarts. Requests are sequential,
+limited to one per second, and stop after repeated failures or a permission or
+rate-limit response. Failed photos can retry at the next album refresh.
+Metadata failures do not block the slideshow or change the source library.
+No Google account login or cookies are used. The endpoint is undocumented and
+may change. Later edits to descriptions on already-cached photos are not
+automatically reread in this experimental build.
+
+The fields are camera attributes, with each paired photo's values also in
+`caption_frames`. See the [attribute reference](reference.md#camera-attributes).
+Disabling the option stops camera/description enrichment; the separate GPS
+option is independent. A HACS reinstall or
+update can replace a locally installed test build.
+
+### Google Location and Privacy
+
+In **Settings > Devices & services > Album Slideshow**, choose the Google
+album's **Configure** button. Location has two independent consent controls:
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| **Read original photo GPS (opt-in)** | Off | Fetches up to 256 KB of each original photo to extract embedded GPS into the existing `latitude` / `longitude` camera attributes |
+| **Look up GPS place names via OpenStreetMap (opt-in)** | Off | When GPS reading is also enabled, sends coordinates to the public Nominatim service and fills the existing `location` attribute and caption field |
+
+**Google only includes GPS in shared originals when location sharing is
+turned on for the album.** Turn it on in the album's options in Google Photos;
+anyone with the album link can then see photo locations. Only enable original
+GPS reading if you intend to expose that location in Home Assistant. No Google
+login is used, and this does not change the source photos or their Google
+sharing settings.
+
+Coordinates and place labels are cached in Home Assistant and included in
+`caption_frames` for each displayed photo. They may also enter recorder history
+and backups. Turning GPS off stops original-header downloads and place-name
+requests, and hides cached coordinates and labels from the current camera.
+Turning only place names off retains GPS attributes but hides the label and
+stops Nominatim requests. Opting out is not an erasure of older caches, recorded
+history, or backups.
+
+The original header is read separately from the resized slideshow image, in
+the background. Successful scans, including photos with no GPS, are cached by
+photo identity, so turning on location sharing later does not rescan them on
+its own: turn **Read original photo GPS** off, save, then turn it back on.
+Failed or truncated reads retry on a later album refresh; the integration does
+not download the full original to work around the header cap. GPS stored beyond
+the cap may therefore be missed.
+This reads embedded camera GPS, not locations added, edited, or estimated in
+Google Photos. No additional per-photo sensors are created.
 
 ### Google Photos Limits
 
@@ -87,6 +149,19 @@ endpoint (with `type` forced to images). Examples:
 { "country": "Japan", "takenAfter": "2023-01-01T00:00:00Z" }
 ```
 
+### Changing an Existing Source
+
+Open **Settings > Devices & services > Album Slideshow** and use the Immich
+entry's **Configure** button to change its albums, people, favorites, search
+filter, name, or image quality. The reverse-geocoding privacy toggle remains
+available. Saving reloads that slideshow without changing its entry ID,
+entities, runtime settings, or hidden-photo list.
+
+Saved albums and people that cannot currently be listed remain selected and
+are marked **unavailable**. They are not silently removed. Deselecting all
+sources and clearing the filter deliberately selects the entire library.
+If the stored connection fails, the flow first asks for a working URL and key.
+
 ### Image Quality
 
 - **Preview** (default) - a downscaled preview; smoothest slideshow.
@@ -106,12 +181,17 @@ endpoint (with `type` forced to images). Examples:
 
 ### Face-aware Cropping
 
-When you select one or more **People** and use **Cover** fill mode, the
-integration uses Immich's recognized-face coordinates to focus the crop on
-those people. This also works when people are combined with albums or
-favorites. With several selected people in a photo, the crop targets the
-center of their combined face region. Each half of a paired slide gets its
-own focus. No new face recognition runs inside Home Assistant.
+In **Cover** fill mode, the integration uses Immich's existing face coordinates
+for albums, people, favorites, all-photo selections, and custom searches.
+Each half of a paired slide gets its own crop. No new face recognition runs
+inside Home Assistant.
+
+The crop favors whole faces and adds room around them where space allows.
+Explicitly selected people take priority over bystanders regardless of their
+relative sizes. Within each priority group, face area determines which group
+to retain when everyone cannot fit. Padding is a preference, not a reason to
+discard a face that fits. If a face is too large for the crop, the crop retains
+visible face area instead of choosing empty background.
 
 - Add the optional `face.read` permission to the Immich API key. For photos
   cropped, rotated, or mirrored inside Immich, also grant `asset.edit.get`
@@ -121,17 +201,29 @@ own focus. No new face recognition runs inside Home Assistant.
   displayed image or written back to your library.
 - Focus arrives through background enrichment. Initial slides may use a
   centered crop until their metadata has been read.
-- Missing permissions, unavailable metadata, or no matching faces fall back
+- Missing permissions, unavailable metadata, or no detected faces fall back
   to the usual centered crop. Failed lookups retry on the next album refresh;
   after granting permissions, press **Refresh album** rather than recreating
   the integration. Existing EXIF metadata and offline playlist caches are kept.
-- **Contain** and **Blur** keep their existing behavior. Album-only,
-  favorites-only, all-photo, and custom-search selections without explicitly
-  selected people keep centered cropping. Generic Media Source cannot provide
-  the required Immich face metadata.
+- **Contain** and **Blur** keep their existing behavior. Generic Media Source
+  cannot provide the required Immich face metadata.
 - A fixed-aspect Cover crop cannot guarantee that every face fits when a
   group spans too much of the photo. Use **Contain** or **Blur** when retaining
   the entire photo is more important than filling the frame.
+
+### Crop Debug Overlay
+
+The per-slideshow **Crop debug overlay** switch is off by default. It draws
+green boxes for kept faces, red for cut faces, and grey for excluded faces
+where their outlines are visible. Thin outlines show preferred padding.
+A yellow crosshair marks the original photo's center; an edge arrow points
+back to it when it is outside the crop. A label summarizes the detected faces
+or shows **no face data** while metadata is unavailable.
+
+The overlay is rendered into the camera image, so all cards using that camera
+see it. Turn it off when finished. Its setting survives restarts. Debug logging
+also includes per-photo crop summaries. Other providers can show the center
+marker but do not gain face recognition.
 
 ### Immich Limits
 
@@ -530,3 +622,51 @@ If your photos are local files (for example a NAS folder mounted under `/media`)
 use the **Local Folder** provider instead of Media Source to get full EXIF-based
 dates, location, and description captions. Google Photos also lacks location
 and descriptions, but does provide dates as shown in the provider table.
+
+## UGREEN NAS (UGOS Photos)
+
+> **Experimental.** This provider talks to the undocumented UGOS Photos web
+> API. UGREEN could change it at any time without notice.
+
+The **UGREEN** provider connects straight to the **Photos** app on a UGREEN
+NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
+
+1. Add the integration and choose **UGREEN NAS (UGOS Photos, experimental)**.
+2. Enter your NAS address including port (e.g. `https://192.168.1.10:9443`)
+   and an account username and password. Leave **Verify SSL certificate** on
+   unless the NAS uses a self-signed certificate (see the notes below).
+3. Pick the album to show from the live, searchable dropdown; each entry
+   shows its album type (see below) to help tell same-named albums apart.
+   The slideshow follows the album by its ID, so renaming it later is fine;
+   the **Album title** sensor picks up the new name on the next refresh.
+
+### Notes
+
+- **Album types.** UGOS Photos has three kinds of albums: **Regular** (a
+  normal album), **Conditional** (a saved search/filter, e.g. by date range,
+  media type, or location), and **Baby** (its baby-photos album). All three
+  can be selected.
+- **Date works; location depends on your library.** Capture date comes back
+  with every photo. GPS coordinates are fetched per photo in the background
+  after the first refresh, so the location attribute and caption may take a
+  moment to appear, and stay empty for photos with no GPS data in UGOS
+  Photos. There is no description/caption field in this API.
+- **Place names.** The NAS's own place name is used when it has one. Photos
+  with GPS but no NAS place name are labeled through OpenStreetMap Nominatim,
+  like the local folder provider; turn off **Reverse-geocode EXIF GPS
+  coordinates via OpenStreetMap** under the album's **Configure** to stop
+  those lookups.
+- The password is RSA-encrypted before it ever leaves Home Assistant, the
+  same way the UGOS web app encrypts it. A fresh session is established on
+  every refresh rather than persisting one.
+- **Two-factor authentication is not yet supported.** Use an account without
+  2FA enabled for now; support for it is planned.
+- **Self-signed certificates.** UGOS web interfaces often use a self-signed
+  HTTPS certificate, which fails verification. Turning off **Verify SSL
+  certificate** lets the connection through without checking which server
+  it reaches, so only do that on a network you trust.
+- New photos added to the album show up on the next refresh.
+
+> **Use a dedicated account.** Create a separate UGOS account for Home
+> Assistant and either create the album with that account or share an
+> existing album with it, rather than using your own admin/personal login.

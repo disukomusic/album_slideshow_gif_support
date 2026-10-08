@@ -7,9 +7,11 @@ implementation. Operates on ``MediaItem``-like objects that expose
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import math
 from typing import Iterable, TypeVar
 
 from .const import (
+    DATE_FILTER_CUSTOM,
     DATE_FILTER_LAST_7,
     DATE_FILTER_LAST_30,
     DATE_FILTER_LAST_365,
@@ -17,7 +19,9 @@ from .const import (
     DATE_FILTER_ON_THIS_DAY,
     DATE_FILTER_THIS_MONTH,
     DATE_FILTER_THIS_YEAR,
+    DEFAULT_CUSTOM_LOOKBACK_DAYS,
     DEFAULT_MISSING_DATE_MODE,
+    MAX_CUSTOM_LOOKBACK_DAYS,
     MISSING_DATE_EXCLUDE,
     MISSING_DATE_USE_UPLOADED,
     ORDER_ALBUM,
@@ -29,6 +33,39 @@ from .const import (
 )
 
 T = TypeVar("T")
+
+
+def age_weights(
+    items: list[T],
+    bias: float,
+    *,
+    missing_date: str = DEFAULT_MISSING_DATE_MODE,
+) -> list[float]:
+    """Return relative draw weights, from 1 to 10, favoring newer (+) or older (-)."""
+    if isinstance(bias, bool) or not isinstance(bias, (int, float)) or not math.isfinite(bias):
+        bias = 0
+    bias = max(-100, min(100, bias))
+    if not bias:
+        return [1.0] * len(items)
+    timestamps = []
+    for item in items:
+        timestamp = getattr(item, "captured_at", None)
+        if type(timestamp) is not int and missing_date == MISSING_DATE_USE_UPLOADED:
+            timestamp = getattr(item, "uploaded_at", None)
+        timestamps.append(timestamp if type(timestamp) is int else None)
+    dated = [timestamp for timestamp in timestamps if timestamp is not None]
+    if not dated or min(dated) == max(dated):
+        return [1.0] * len(items)
+    oldest, newest = min(dated), max(dated)
+    strength = 9 * abs(bias) / 100
+    weights = []
+    for timestamp in timestamps:
+        if timestamp is None:
+            weights.append(1.0)
+            continue
+        position = (timestamp - oldest) / (newest - oldest)
+        weights.append(1 + strength * (position if bias > 0 else 1 - position))
+    return weights
 
 
 def order_items(items: list[T], order_mode: str) -> list[T]:
@@ -76,6 +113,7 @@ def filter_items(
     *,
     mode: str,
     missing_date: str = DEFAULT_MISSING_DATE_MODE,
+    lookback_days: int = DEFAULT_CUSTOM_LOOKBACK_DAYS,
     now: datetime | None = None,
 ) -> list[T]:
     """Filter items by date according to ``mode``.
@@ -97,7 +135,7 @@ def filter_items(
 
     today_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
-    pred, strict = _build_predicate(mode, today_utc)
+    pred, strict = _build_predicate(mode, today_utc, lookback_days)
     if pred is None:
         return list(items)
 
@@ -130,8 +168,14 @@ def filter_items(
 def _build_predicate(
     mode: str,
     today_utc: datetime,
+    lookback_days: int = DEFAULT_CUSTOM_LOOKBACK_DAYS,
 ):
     """Return (predicate, strict). ``strict`` drops items without timestamps."""
+    if mode == DATE_FILTER_CUSTOM:
+        days = lookback_days if type(lookback_days) is int else DEFAULT_CUSTOM_LOOKBACK_DAYS
+        days = max(1, min(MAX_CUSTOM_LOOKBACK_DAYS, days))
+        cutoff = int((today_utc - timedelta(days=days)).timestamp() * 1000)
+        return (lambda timestamp: timestamp >= cutoff), False
     if mode == DATE_FILTER_LAST_7:
         cutoff = int((today_utc - timedelta(days=7)).timestamp() * 1000)
         return (lambda ts: ts >= cutoff), False

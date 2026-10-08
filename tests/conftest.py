@@ -100,6 +100,9 @@ class _Store:
     async def async_save(self, *a, **kw):
         return None
 
+    async def async_remove(self):
+        return None
+
 
 _storage.Store = _Store  # type: ignore[attr-defined]
 
@@ -172,7 +175,14 @@ import homeassistant.components.sensor as _sensor
 
 
 class _SensorEntity:
-    pass
+    async def async_added_to_hass(self):
+        pass
+
+    def async_on_remove(self, func):
+        self.__dict__.setdefault("_on_remove", []).append(func)
+
+    def async_write_ha_state(self):
+        pass
 
 
 _sensor.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
@@ -183,3 +193,60 @@ class _SensorStateClass:
 
 
 _sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
+
+
+# helpers.selector: just enough for config_flow to build its schemas.
+import homeassistant.helpers.selector as _selector
+
+
+class _SelectorBase:
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        return value
+
+
+_selector.SelectOptionDict = dict  # type: ignore[attr-defined]
+_selector.SelectSelectorConfig = lambda **kw: kw  # type: ignore[attr-defined]
+_selector.SelectSelectorMode = types.SimpleNamespace(DROPDOWN="dropdown", LIST="list")  # type: ignore[attr-defined]
+_selector.SelectSelector = _SelectorBase  # type: ignore[attr-defined]
+_selector.BooleanSelector = _SelectorBase  # type: ignore[attr-defined]
+
+
+_make_stub(
+    "homeassistant.components.number", "homeassistant.components.select",
+    "homeassistant.components.text", "homeassistant.helpers.restore_state",
+)
+import homeassistant.components.number as _number
+import homeassistant.components.select as _select
+import homeassistant.components.text as _text
+import homeassistant.helpers.restore_state as _restore_state
+
+
+class _RestoreEntity:
+    async def async_added_to_hass(self):
+        pass
+
+    async def async_get_last_state(self):
+        return None
+
+    def async_write_ha_state(self):
+        pass
+
+
+class _NumberEntity:
+    pass
+
+
+class _SelectEntity:
+    @property
+    def options(self):
+        return self._attr_options
+
+
+_number.NumberEntity = _NumberEntity
+_number.NumberMode = types.SimpleNamespace(BOX="box", SLIDER="slider")
+_select.SelectEntity = _SelectEntity
+_text.TextEntity = type("TextEntity", (), {})
+_restore_state.RestoreEntity = _RestoreEntity
