@@ -1,12 +1,12 @@
 {
   "domain": "album_slideshow",
-  "name": "Album Slideshow Camera",
-  "codeowners": ["@eyalgal"],
+  "name": "Album Slideshow Camera With Gif Support",
+  "codeowners": ["@eyalgal", "@disukomusic"],
   "config_flow": true,
   "dependencies": ["http", "frontend", "media_source"],
-  "documentation": "https://github.com/eyalgal/album_slideshow",
+  "documentation": "https://github.com/disukomusic/album_slideshow_gif_support",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/eyalgal/album_slideshow/issues",
+  "issue_tracker": "https://github.com/disukomusic/album_slideshow_gif_support/issues",
   "requirements": ["PyNaCl>=1.5.0"],
   "version": "1.14.0"
 }
