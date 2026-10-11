@@ -184,14 +184,15 @@ def render_image(
             elif fill_mode == FILL_BLUR:
                 processed = _blur_fill(frame_rgba, width, height)
             else:
-                processed = _resize_cover(frame_rgba, width, height, hints) # Changed focus to hints
+                processed = _resize_cover(frame_rgba, width, height, hints)
             frames.append(processed)
 
         res = frames[0]
         res.info = img.info.copy()
-        res.info["append_images"] = frames[1:]
         res.info["duration"] = durations
+        res._frames = frames  # Store frames reference for encode_image
         res.is_animated = True
+        res.format = "GIF"
         return res
 
     hints = hints or CropHints()
@@ -313,18 +314,28 @@ def encode_image(img: Image.Image) -> bytes:
     out = io.BytesIO()
 
     if getattr(img, "is_animated", False):
-        fmt = img.info.get("original_format", "GIF")
-        if fmt not in ("GIF", "WEBP", "PNG"):
-            fmt = "GIF"
+        frames = getattr(img, "_frames", None) or [img] + img.info.get("append_images", [])
+        
+        # Convert all frames to palette mode ('P') for clean GIF encoding
+        paletted_frames = []
+        for f in frames:
+            if f.mode != "P":
+                paletted_frames.append(f.convert("P", palette=Image.Palette.ADAPTIVE))
+            else:
+                paletted_frames.append(f)
 
-        img.save(
+        durations = img.info.get("duration", 100)
+        loop = img.info.get("loop", 0)
+
+        paletted_frames[0].save(
             out,
-            format=fmt,
+            format="GIF",
             save_all=True,
-            append_images=img.info.get("append_images", []),
-            loop=img.info.get("loop", 0),
-            duration=img.info.get("duration", 100),
-            disposal=2  # Clears the background between frames
+            append_images=paletted_frames[1:],
+            loop=loop,
+            duration=durations,
+            disposal=2,
+            optimize=False,
         )
         return out.getvalue()
 
@@ -343,6 +354,7 @@ def encode_image(img: Image.Image) -> bytes:
     if rgb is not img:
         safe_close(rgb)
     return out.getvalue()
+
 
 def parse_divider_color(color: str) -> tuple[tuple[int, int, int] | tuple[int, int, int, int], bool]:
     raw = (color or "").strip().lower()
