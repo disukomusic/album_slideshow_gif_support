@@ -172,12 +172,17 @@ def render_image(
 ) -> Image.Image:
     """Render img into a (width x height) canvas using the given fill mode."""
     if getattr(img, "is_animated", False):
+        max_dim = 1280
+        if width > max_dim or height > max_dim:
+            scale = max_dim / max(width, height)
+            width = max(1, int(width * scale))
+            height = max(1, int(height * scale))
+
         frames = []
         durations = []
-        for frame in ImageSequence.Iterator(img):
-            # Extract the delay for this specific frame, fallback to 100ms
-            durations.append(frame.info.get("duration", 100))
 
+        for frame in ImageSequence.Iterator(img):
+            durations.append(frame.info.get("duration", 100))
             frame_rgba = frame.convert("RGBA")
             if fill_mode == FILL_CONTAIN:
                 processed = _resize_contain(frame_rgba, width, height)
@@ -192,7 +197,7 @@ def render_image(
         res.info["duration"] = durations
         res._frames = frames  # Store frames reference for encode_image
         res.is_animated = True
-        res.format = "GIF"
+        res.format = "WEBP"  # Flag for the encoder
         return res
 
     hints = hints or CropHints()
@@ -315,27 +320,20 @@ def encode_image(img: Image.Image) -> bytes:
 
     if getattr(img, "is_animated", False):
         frames = getattr(img, "_frames", None) or [img] + img.info.get("append_images", [])
-        
-        # Convert all frames to palette mode ('P') for clean GIF encoding
-        paletted_frames = []
-        for f in frames:
-            if f.mode != "P":
-                paletted_frames.append(f.convert("P", palette=Image.Palette.ADAPTIVE))
-            else:
-                paletted_frames.append(f)
 
         durations = img.info.get("duration", 100)
         loop = img.info.get("loop", 0)
 
-        paletted_frames[0].save(
+        frames[0].save(
             out,
-            format="GIF",
+            format="WEBP",
             save_all=True,
-            append_images=paletted_frames[1:],
+            append_images=frames[1:],
             loop=loop,
             duration=durations,
-            disposal=2,
-            optimize=False,
+            quality=80,
+            method=3,
+            lossless=False
         )
         return out.getvalue()
 
@@ -354,7 +352,6 @@ def encode_image(img: Image.Image) -> bytes:
     if rgb is not img:
         safe_close(rgb)
     return out.getvalue()
-
 
 def parse_divider_color(color: str) -> tuple[tuple[int, int, int] | tuple[int, int, int, int], bool]:
     raw = (color or "").strip().lower()
