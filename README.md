@@ -1,3 +1,5 @@
+THIS FORK IS VERY MEMORY HUNGRY! CONSIDER LOWERING THE BUFFER SETTINGS AND LOWERING MAX RESOLUTION SUBSTANTIALLY
+
 <a id="-album-slideshow-camera-for-home-assistant"></a>
 # Album Slideshow Camera for Home Assistant
 
