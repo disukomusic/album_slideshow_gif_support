@@ -243,7 +243,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 class AlbumSlideshowCamera(Camera):
     _attr_should_poll = False
-
+    _attr_frame_interval = 5.0
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: AlbumCoordinator, store: SlideshowStore) -> None:
         super().__init__()
         self.hass = hass
