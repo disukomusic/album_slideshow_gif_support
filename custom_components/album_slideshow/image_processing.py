@@ -64,16 +64,10 @@ def open_image(
     data: bytes,
     target_size: tuple[int, int] | None = None,
 ) -> Image.Image:
-    """Open image bytes, apply EXIF orientation, normalise to RGB/RGBA.
-
-    If ``target_size`` is given, uses PIL's ``draft`` mode so libjpeg decodes
-    at a reduced scale. Big speed/memory win on low-power devices when the
-    source is much larger than the output canvas.
-    """
+    """Open image bytes, apply EXIF orientation, normalise to RGB/RGBA."""
     img = Image.open(io.BytesIO(data))
-    
+
     if getattr(img, "is_animated", False):
-        # Do not transpose or force a single mode yet to preserve animation
         return img
 
     if target_size is not None and img.format == "JPEG":
@@ -81,18 +75,33 @@ def open_image(
             img.draft("RGB", target_size)
         except Exception:
             pass
-    img = ImageOps.exif_transpose(img)
-    # Force pixel data into memory; BytesIO must stay reachable until here.
+
+    transposed = ImageOps.exif_transpose(img)
+    if transposed is not img:
+        safe_close(img)
+        img = transposed
+
     img.load()
     if img.mode not in ("RGB", "RGBA"):
-        img = img.convert("RGB")
+        converted = img.convert("RGB")
+        safe_close(img)
+        img = converted
     return img
 
 
 def safe_close(img: Image.Image | None) -> None:
-    """Close a PIL image without raising. No-op on None."""
+    """Close a PIL image and any attached animation frames without raising."""
     if img is None:
         return
+    frames = getattr(img, "_frames", None)
+    if frames:
+        img._frames = None
+        for f in frames:
+            if f is not img:
+                try:
+                    f.close()
+                except Exception:
+                    pass
     try:
         img.close()
     except Exception:
@@ -164,11 +173,11 @@ def resolve_output_size(
 
 
 def render_image(
-        img: Image.Image,
-        fill_mode: str,
-        width: int,
-        height: int,
-        hints: CropHints | None = None,
+    img: Image.Image,
+    fill_mode: str,
+    width: int,
+    height: int,
+    hints: CropHints | None = None,
 ) -> Image.Image:
     """Render img into a (width x height) canvas using the given fill mode."""
     if getattr(img, "is_animated", False):
@@ -184,20 +193,29 @@ def render_image(
         for frame in ImageSequence.Iterator(img):
             durations.append(frame.info.get("duration", 100))
             frame_rgba = frame.convert("RGBA")
-            if fill_mode == FILL_CONTAIN:
-                processed = _resize_contain(frame_rgba, width, height)
-            elif fill_mode == FILL_BLUR:
-                processed = _blur_fill(frame_rgba, width, height)
-            else:
-                processed = _resize_cover(frame_rgba, width, height, hints)
-            frames.append(processed)
+            try:
+                if fill_mode == FILL_CONTAIN:
+                    processed = _resize_contain(frame_rgba, width, height)
+                elif fill_mode == FILL_BLUR:
+                    processed = _blur_fill(frame_rgba, width, height)
+                else:
+                    processed = _resize_cover(frame_rgba, width, height, hints)
+                # Flatten frame to RGB so WebP encoder doesn't process unused alpha
+                if processed.mode != "RGB":
+                    rgb_frame = processed.convert("RGB")
+                    safe_close(processed)
+                    processed = rgb_frame
+                frames.append(processed)
+            finally:
+                safe_close(frame_rgba)
 
         res = frames[0]
         res.info = img.info.copy()
         res.info["duration"] = durations
-        res._frames = frames  # Store frames reference for encode_image
+        # Store only tail frames to avoid a self-referencing cycle on frames[0]
+        res._frames = frames[1:]
         res.is_animated = True
-        res.format = "WEBP"  # Flag for the encoder
+        res.format = "WEBP"
         return res
 
     hints = hints or CropHints()
@@ -221,57 +239,74 @@ def pair_images(
     hints2: CropHints | None = None,
 ) -> Image.Image:
     canvas_mode = "RGBA" if transparent_divider else "RGB"
-    
+
     if portrait_canvas:
         top_h = max(1, (target_h - divider) // 2)
         bottom_h = max(1, target_h - divider - top_h)
         img1_rendered = render_image(img1, fill_mode, target_w, top_h, hints1)
         img2_rendered = render_image(img2, fill_mode, target_w, bottom_h, hints2)
-        boxes = [((0, 0), img1_rendered), ((0, top_h + divider), img2_rendered)]
+        pos1, pos2 = (0, 0), (0, top_h + divider)
     else:
         left_w = max(1, (target_w - divider) // 2)
         right_w = max(1, target_w - divider - left_w)
         img1_rendered = render_image(img1, fill_mode, left_w, target_h, hints1)
         img2_rendered = render_image(img2, fill_mode, right_w, target_h, hints2)
-        boxes = [((0, 0), img1_rendered), ((left_w + divider, 0), img2_rendered)]
+        pos1, pos2 = (0, 0), (left_w + divider, 0)
 
-    is_animated = getattr(img1_rendered, "is_animated", False) or getattr(img2_rendered, "is_animated", False)
+    def _paste_clean(canvas: Image.Image, src: Image.Image, pos: tuple[int, int]) -> None:
+        conv = src if src.mode == canvas_mode else src.convert(canvas_mode)
+        try:
+            canvas.paste(conv, pos)
+        finally:
+            if conv is not src:
+                safe_close(conv)
+
+    is_animated = getattr(img1_rendered, "is_animated", False) or getattr(
+        img2_rendered, "is_animated", False
+    )
 
     if not is_animated:
         canvas = Image.new(canvas_mode, (target_w, target_h), divider_fill)
-        for pos, img in boxes:
-            canvas.paste(img.convert(canvas_mode), pos)
-            safe_close(img)
+        if transparent_divider:
+            canvas.info["keep_alpha"] = True
+        try:
+            _paste_clean(canvas, img1_rendered, pos1)
+            _paste_clean(canvas, img2_rendered, pos2)
+        finally:
+            safe_close(img1_rendered)
+            safe_close(img2_rendered)
         return canvas
 
-    frames1 = getattr(img1_rendered, "_frames", [img1_rendered])
-    frames2 = getattr(img2_rendered, "_frames", [img2_rendered])
+    # Reconstruct full frame lists (head + tail frames)
+    frames1 = [img1_rendered] + list(getattr(img1_rendered, "_frames", None) or [])
+    frames2 = [img2_rendered] + list(getattr(img2_rendered, "_frames", None) or [])
     max_frames = max(len(frames1), len(frames2))
 
-    paired_frames = []
-    for i in range(max_frames):
-        canvas = Image.new(canvas_mode, (target_w, target_h), divider_fill)
-        f1 = frames1[i % len(frames1)]
-        f2 = frames2[i % len(frames2)]
-        if portrait_canvas:
-            canvas.paste(f1.convert(canvas_mode), (0, 0))
-            canvas.paste(f2.convert(canvas_mode), (0, top_h + divider))
-        else:
-            canvas.paste(f1.convert(canvas_mode), (0, 0))
-            canvas.paste(f2.convert(canvas_mode), (left_w + divider, 0))
-        paired_frames.append(canvas)
+    src_anim = (
+        img1_rendered
+        if getattr(img1_rendered, "is_animated", False)
+        else img2_rendered
+    )
+    anim_info = src_anim.info.copy()
+    anim_format = src_anim.format
 
-    safe_close(img1_rendered)
-    safe_close(img2_rendered)
+    paired_frames = []
+    try:
+        for i in range(max_frames):
+            canvas = Image.new(canvas_mode, (target_w, target_h), divider_fill)
+            _paste_clean(canvas, frames1[i % len(frames1)], pos1)
+            _paste_clean(canvas, frames2[i % len(frames2)], pos2)
+            paired_frames.append(canvas)
+    finally:
+        safe_close(img1_rendered)
+        safe_close(img2_rendered)
 
     res = paired_frames[0]
-    src_anim = img1_rendered if getattr(img1_rendered, "is_animated", False) else img2_rendered
-    res.info = src_anim.info.copy()
-    res.format = src_anim.format
+    res.info = anim_info
+    res.format = anim_format
     res.is_animated = True
-    res._frames = paired_frames
+    res._frames = paired_frames[1:]
     return res
-
 
 def render_pair_photo(
     data: bytes,
@@ -315,43 +350,50 @@ def render_pair_photo(
 
 
 def encode_image(img: Image.Image) -> bytes:
-    """Encode a PIL image to a client-compatible JPEG, PNG, WEBP, or GIF."""
+    """Encode a PIL image to a client-compatible JPEG, PNG, or WEBP."""
     out = io.BytesIO()
 
     if getattr(img, "is_animated", False):
-        frames = getattr(img, "_frames", None) or [img] + img.info.get("append_images", [])
-
+        tail_frames = getattr(img, "_frames", None) or img.info.get("append_images", [])
         durations = img.info.get("duration", 100)
         loop = img.info.get("loop", 0)
+        try:
+            img.save(
+                out,
+                format="WEBP",
+                save_all=True,
+                append_images=list(tail_frames),
+                loop=loop,
+                duration=durations,
+                quality=78,
+                method=1,  # method=1 is ~4x faster and uses far less RAM than method=3
+                lossless=False,
+            )
+            return out.getvalue()
+        finally:
+            for f in tail_frames:
+                safe_close(f)
+            img._frames = None
 
-        frames[0].save(
+    # Only use PNG if transparent divider was explicitly requested; otherwise flatten to JPEG
+    if img.mode == "RGBA" and img.info.get("keep_alpha"):
+        img.save(out, format="PNG", compress_level=3)
+        return out.getvalue()
+
+    rgb = img if img.mode == "RGB" else img.convert("RGB")
+    try:
+        rgb.save(
             out,
-            format="WEBP",
-            save_all=True,
-            append_images=frames[1:],
-            loop=loop,
-            duration=durations,
-            quality=80,
-            method=3,
-            lossless=False
+            format="JPEG",
+            quality=85,
+            optimize=False,
+            progressive=False,
+            subsampling=2,
         )
         return out.getvalue()
-
-    if "A" in img.getbands():
-        img.save(out, format="PNG", optimize=True)
-        return out.getvalue()
-    rgb = img if img.mode == "RGB" else img.convert("RGB")
-    rgb.save(
-        out,
-        format="JPEG",
-        quality=88,
-        optimize=True,
-        progressive=False,
-        subsampling=2,
-    )
-    if rgb is not img:
-        safe_close(rgb)
-    return out.getvalue()
+    finally:
+        if rgb is not img:
+            safe_close(rgb)
 
 def parse_divider_color(color: str) -> tuple[tuple[int, int, int] | tuple[int, int, int, int], bool]:
     raw = (color or "").strip().lower()
@@ -658,19 +700,30 @@ def _resize_contain(
     scale = min(target_w / src_w, target_h / src_h)
     new_w = max(1, int(src_w * scale))
     new_h = max(1, int(src_h * scale))
-    resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    _debug_uncropped(resized, hints)
-    canvas_mode = "RGBA" if img.mode == "RGBA" or len(bg) == 4 else "RGB"
-    canvas = Image.new(canvas_mode, (target_w, target_h), bg)
+    resample = (
+        Image.Resampling.BILINEAR
+        if getattr(img, "is_animated", False)
+        else Image.Resampling.LANCZOS
+    )
+    resized = img.resize((new_w, new_h), resample)
+    try:
+        _debug_uncropped(resized, hints)
+        canvas_mode = "RGBA" if len(bg) == 4 else "RGB"
+        canvas = Image.new(canvas_mode, (target_w, target_h), bg)
+        pos = ((target_w - new_w) // 2, (target_h - new_h) // 2)
 
-    img_conv = resized if resized.mode == canvas_mode else resized.convert(canvas_mode)
-    canvas.paste(img_conv, ((target_w - new_w) // 2, (target_h - new_h) // 2))
-
-    if img_conv is not resized:
-        safe_close(img_conv)
-    safe_close(resized)
-    return canvas
-
+        if resized.mode == "RGBA":
+            canvas.paste(resized, pos, resized)
+        else:
+            img_conv = resized if resized.mode == canvas_mode else resized.convert(canvas_mode)
+            try:
+                canvas.paste(img_conv, pos)
+            finally:
+                if img_conv is not resized:
+                    safe_close(img_conv)
+        return canvas
+    finally:
+        safe_close(resized)
 
 def _debug_uncropped(img: Image.Image, hints: CropHints | None) -> None:
     """Debug marks for fill modes that never crop: every face is kept."""
@@ -688,21 +741,60 @@ def _blur_fill(
     target_h: int,
     hints: CropHints | None = None,
 ) -> Image.Image:
-    bg = _resize_cover(img, target_w, target_h).filter(ImageFilter.GaussianBlur(radius=24))
+    """Fast blur fill: downscale 8x, apply small Gaussian blur, and upscale."""
     src_w, src_h = img.size
     if src_w <= 0 or src_h <= 0:
-        return bg
-    scale = min(target_w / src_w, target_h / src_h)
-    new_w = max(1, int(src_w * scale))
-    new_h = max(1, int(src_h * scale))
-    fg = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    _debug_uncropped(fg, hints)
-    rgb_fg = fg if fg.mode == bg.mode else fg.convert(bg.mode)
-    if "A" in rgb_fg.getbands():
-        bg.paste(rgb_fg, ((target_w - new_w) // 2, (target_h - new_h) // 2), rgb_fg)
-    else:
-        bg.paste(rgb_fg, ((target_w - new_w) // 2, (target_h - new_h) // 2))
-    if rgb_fg is not fg:
-        safe_close(rgb_fg)
-    safe_close(fg)
+        return Image.new("RGB", (target_w, target_h), (0, 0, 0))
+
+    # 1. Create a tiny 1/8th scale cover crop for the background blur
+    small_w = max(16, target_w // 8)
+    small_h = max(16, target_h // 8)
+    bg_scale = max(small_w / src_w, small_h / src_h)
+    crop_w = min(src_w, max(1, int(round(small_w / bg_scale))))
+    crop_h = min(src_h, max(1, int(round(small_h / bg_scale))))
+    left = (src_w - crop_w) // 2
+    top = (src_h - crop_h) // 2
+
+    rgb_src = img if img.mode == "RGB" else img.convert("RGB")
+    try:
+        small_bg = rgb_src.resize(
+            (small_w, small_h),
+            Image.Resampling.BILINEAR,
+            box=(left, top, left + crop_w, top + crop_h),
+        )
+    finally:
+        if rgb_src is not img:
+            safe_close(rgb_src)
+
+    blurred_small = small_bg.filter(ImageFilter.GaussianBlur(radius=3))
+    safe_close(small_bg)
+
+    bg = blurred_small.resize((target_w, target_h), Image.Resampling.BILINEAR)
+    safe_close(blurred_small)
+
+    # 2. Render foreground image (use BILINEAR for animations, LANCZOS for stills)
+    fg_scale = min(target_w / src_w, target_h / src_h)
+    new_w = max(1, int(src_w * fg_scale))
+    new_h = max(1, int(src_h * fg_scale))
+    resample = (
+        Image.Resampling.BILINEAR
+        if getattr(img, "is_animated", False)
+        else Image.Resampling.LANCZOS
+    )
+    fg = img.resize((new_w, new_h), resample)
+    try:
+        _debug_uncropped(fg, hints)
+        pos = ((target_w - new_w) // 2, (target_h - new_h) // 2)
+        if fg.mode == "RGBA":
+            bg.paste(fg, pos, fg)
+        else:
+            rgb_fg = fg if fg.mode == "RGB" else fg.convert("RGB")
+            try:
+                bg.paste(rgb_fg, pos)
+            finally:
+                if rgb_fg is not fg:
+                    safe_close(rgb_fg)
+    finally:
+        safe_close(fg)
+
     return bg
